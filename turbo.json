@@ -1,0 +1,32 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "tui",
+  "envMode": "loose",
+  "tasks": {
+    "start": {
+      "dependsOn": ["^start"]
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", ".env*"],
+      "outputs": [".next/**", "!.next/cache/**", "dist/**"]
+    },
+    "lint": {
+      "dependsOn": ["^lint"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "test:unit": {},
+    "find-deadcode": {
+      "dependsOn": ["^find-deadcode:web"]
+    },
+    "find-deadcode:web": {
+      "dependsOn": ["^find-deadcode:web"]
+    }
+  }
+}
