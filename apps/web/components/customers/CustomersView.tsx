@@ -25,8 +25,10 @@ export function CustomersView() {
   const [list, setList] = useState<Customer[]>(seed);
   const [query, setQuery] = useState('');
 
-  // Load any customers added in a previous session.
+  // Load any customers added in a previous session. localStorage is a
+  // client-only external store, so we hydrate from it after mount (SSR-safe).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- syncing from an external (localStorage) store on mount
     setList(localStore.get<Customer[]>(STORE_KEY, seed));
   }, []);
 
@@ -43,7 +45,8 @@ export function CustomersView() {
     const q = query.trim().toLowerCase();
     if (!q) return list;
     return list.filter(
-      (c) => c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q) || c.company.toLowerCase().includes(q),
+      (c) =>
+        c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q) || c.company.toLowerCase().includes(q),
     );
   }, [list, query]);
 
