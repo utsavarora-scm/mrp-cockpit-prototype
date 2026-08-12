@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ['@repo/ui'],
+  transpilePackages: ['@repo/ui', '@repo/domain', '@repo/mrp-engine', '@repo/adapters', '@repo/data-packs'],
   reactStrictMode: false,
   images: {
     remotePatterns: [

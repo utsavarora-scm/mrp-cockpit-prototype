@@ -1,0 +1,108 @@
+/**
+ * The density layer.
+ *
+ * The shared design tokens stay exactly as they are — neutral base, one teal
+ * accent. Density comes from row height, rule weight and figure alignment
+ * rather than from darkness or from new colours, so the whole thing still reads
+ * as one system with everything else built on this template.
+ */
+
+@import '@repo/ui/globals.css';
+
+/*
+ * Real utilities, not plain classes: `@utility` is what lets these be composed
+ * with `@apply` as well as used directly in markup.
+ */
+@utility mono {
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Numeric columns are right-aligned; identifiers stay left. */
+@utility num {
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* A dense table row: hairline rules, tight leading, no zebra striping. */
+@utility grid-row {
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+}
+
+@utility grid-cell {
+  padding-inline: calc(var(--spacing) * 2);
+  padding-block: 5px;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+@utility grid-head {
+  padding-inline: calc(var(--spacing) * 2);
+  padding-block: calc(var(--spacing) * 1.5);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+/*
+ * Severity. Encoded on the single-hue accent ramp plus the destructive token,
+ * never on new colours — a dense board earns its legibility from typography,
+ * not from a traffic-light palette.
+ */
+@utility sev-critical {
+  background-color: color-mix(in oklab, var(--destructive) 12%, transparent);
+  color: var(--destructive);
+  border-color: color-mix(in oklab, var(--destructive) 30%, transparent);
+}
+
+@utility sev-high {
+  background-color: color-mix(in oklab, var(--primary) 15%, transparent);
+  color: var(--primary);
+  border-color: color-mix(in oklab, var(--primary) 30%, transparent);
+}
+
+@utility sev-medium {
+  background-color: color-mix(in oklab, var(--primary) 8%, transparent);
+  color: color-mix(in oklab, var(--primary) 85%, var(--foreground));
+  border-color: color-mix(in oklab, var(--primary) 20%, transparent);
+}
+
+@utility sev-low {
+  background-color: var(--muted);
+  color: var(--muted-foreground);
+  border-color: var(--border);
+}
+
+@utility health-fresh {
+  color: var(--primary);
+}
+
+@utility health-drifted {
+  color: var(--foreground);
+  background-color: color-mix(in oklab, var(--primary) 10%, transparent);
+}
+
+@utility health-missing {
+  color: var(--destructive);
+  background-color: color-mix(in oklab, var(--destructive) 10%, transparent);
+}
+
+@layer base {
+  /* Every figure in a table is tabular, so digits align down a column. */
+  table td,
+  table th {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The dense screens are designed for 1440px and up; below that they scroll. */
+  .board {
+    min-width: 1180px;
+  }
+}

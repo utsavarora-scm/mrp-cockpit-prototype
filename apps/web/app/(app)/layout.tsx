@@ -1,11 +1,11 @@
-import { SidebarInset, SidebarProvider } from '@repo/ui/components/sidebar';
-import { AppSidebar } from '@/components/app-shell/AppSidebar';
+import { TopNav } from '@/components/app-shell/TopNav';
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
-    <SidebarProvider>
-      <AppSidebar />
-      <SidebarInset>{children}</SidebarInset>
-    </SidebarProvider>
+    <div className='flex min-h-svh flex-col'>
+      <TopNav />
+      {/* The dense screens are designed for 1440px and up and scroll below it. */}
+      <main className='board flex-1 overflow-x-auto'>{children}</main>
+    </div>
   );
 }

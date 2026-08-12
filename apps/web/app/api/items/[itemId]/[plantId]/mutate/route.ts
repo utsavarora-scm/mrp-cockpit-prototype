@@ -1,0 +1,72 @@
+/**
+ * Editing a planning parameter from the Item 360 grid.
+ *
+ * This is the "change that number and re-run it" answer. The edit is committed
+ * to the session as a change like any other, the plan cache drops, and the next
+ * read re-plans — which is why the cockpit queue reorders behind you.
+ */
+
+import { NextResponse } from 'next/server';
+import type { SnapshotMutation } from '@repo/domain';
+
+import { commitChange } from '@/lib/server/planning-session';
+import { itemDetail } from '@/lib/server/projections';
+
+export const dynamic = 'force-dynamic';
+
+/** Only planning parameters may be edited this way — never derived values. */
+const EDITABLE_FIELDS = new Set([
+  'leadTimeDays',
+  'safetyStock',
+  'fixedLotSize',
+  'minLotSize',
+  'maxLotSize',
+  'roundingValue',
+  'periodsOfSupplyDays',
+  'reorderPoint',
+  'safetyTimeDays',
+  'grProcessingTimeDays',
+  'scrapPct',
+  'serviceLevelTarget',
+]);
+
+export async function POST(request: Request, context: { params: Promise<{ itemId: string; plantId: string }> }) {
+  const { itemId: rawItem, plantId: rawPlant } = await context.params;
+  const itemId = decodeURIComponent(rawItem);
+  const plantId = decodeURIComponent(rawPlant);
+
+  const body = (await request.json()) as { field?: string; value?: number | null; scenario?: string };
+  const scenarioId = body.scenario ?? 'baseline';
+
+  if (!body.field || !EDITABLE_FIELDS.has(body.field)) {
+    return NextResponse.json(
+      { error: `"${body.field ?? 'that field'}" is not an editable planning parameter.` },
+      { status: 400 },
+    );
+  }
+  if (body.value !== null && (typeof body.value !== 'number' || !Number.isFinite(body.value))) {
+    return NextResponse.json({ error: 'That value is not a number the plan can use.' }, { status: 400 });
+  }
+
+  const mutation: SnapshotMutation = {
+    kind: 'SET_ITEM_PLANT_PARAM',
+    itemId,
+    plantId,
+    field: body.field as Extract<SnapshotMutation, { kind: 'SET_ITEM_PLANT_PARAM' }>['field'],
+    value: body.value ?? null,
+  };
+
+  commitChange({
+    exceptionId: '—',
+    resolutionId: '—',
+    label: `${body.field} set to ${body.value ?? 'not maintained'} on ${itemId} at ${plantId}`,
+    mutations: [mutation],
+    appliedByAgent: false,
+    estimatedImpact: 0,
+  });
+
+  const detail = itemDetail(scenarioId, itemId, plantId);
+  if (!detail)
+    return NextResponse.json({ error: 'The item could not be re-planned after that edit.' }, { status: 404 });
+  return NextResponse.json(detail);
+}

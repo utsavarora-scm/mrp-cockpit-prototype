@@ -1,0 +1,14 @@
+{
+  "extends": "@repo/typescript-config/base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["vitest/globals"],
+    "baseUrl": "."
+  },
+  "include": ["src", "tests"],
+  "exclude": ["**/node_modules/**"]
+}

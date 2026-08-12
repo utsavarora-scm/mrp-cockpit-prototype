@@ -1,13 +1,13 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import Providers from '@/app/providers';
-import { dmSans } from '@/lib/fonts';
+import { dmSans, plexMono } from '@/lib/fonts';
 import GlobalLoading from './loading';
-import '@repo/ui/globals.css';
+import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Prototype',
-  description: 'A clickable prototype built with the Next Prototype Template',
+  title: 'MRP Exception Cockpit',
+  description: 'Planning exceptions across SAP, Kinaxis and o9, ranked by what they cost.',
 };
 
 export default function RootLayout({
@@ -17,7 +17,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang='en' suppressHydrationWarning>
-      <body className={`${dmSans.className} antialiased`}>
+      <body className={`${dmSans.className} ${plexMono.variable} antialiased`}>
         <Suspense fallback={<GlobalLoading />}>
           <Providers>{children}</Providers>
         </Suspense>
