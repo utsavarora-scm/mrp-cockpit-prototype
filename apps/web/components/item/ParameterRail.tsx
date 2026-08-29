@@ -14,7 +14,7 @@ import { Button } from '@repo/ui/components/button';
 import { Input } from '@repo/ui/components/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@repo/ui/components/tooltip';
 import { cn } from '@repo/ui/lib/utils';
-import { Check, Pencil, X } from 'lucide-react';
+import { Check, Pencil, SlidersHorizontal, X } from 'lucide-react';
 import { useState } from 'react';
 
 import type { ItemDetail, ParameterHealth } from '@/lib/api-types';
@@ -37,10 +37,13 @@ const EDITABLE = new Set([
 export function ParameterRail({
   detail,
   onEdit,
+  onOverride,
   isSaving,
 }: {
   detail: ItemDetail;
   onEdit: (field: string, value: number | null) => void;
+  /** Opens the weighed override — reason captured, consequence shown first. */
+  onOverride: (parameter: ParameterHealth) => void;
   isSaving: boolean;
 }) {
   const drifted = detail.parameters.filter((row) => row.status === 'DRIFTED').length;
@@ -81,6 +84,7 @@ export function ParameterRail({
             row={row}
             editable={EDITABLE.has(row.field)}
             onEdit={onEdit}
+            onOverride={onOverride}
             isSaving={isSaving}
           />
         ))}
@@ -93,11 +97,13 @@ function ParameterRow({
   row,
   editable,
   onEdit,
+  onOverride,
   isSaving,
 }: {
   row: ParameterHealth;
   editable: boolean;
   onEdit: (field: string, value: number | null) => void;
+  onOverride: (parameter: ParameterHealth) => void;
   isSaving: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -122,15 +128,39 @@ function ParameterRow({
         <div className='flex items-center gap-1'>
           <StatusDot status={row.status} />
           {editable && !editing ? (
-            <Button
-              variant='ghost'
-              size='sm'
-              className='h-4 w-4 p-0 opacity-0 transition-opacity group-hover:opacity-60 hover:opacity-100'
-              onClick={start}
-              aria-label={`Edit ${row.label}`}
-            >
-              <Pencil className='size-3' />
-            </Button>
+            <>
+              {/* Two paths, deliberately. The pencil is the quick correction;
+                  the sliders open the weighed override, where the planner sees
+                  the consequence and records why before anything is applied. */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant='ghost'
+                    size='sm'
+                    className='h-4 w-4 p-0 opacity-0 transition-opacity group-hover:opacity-60 hover:opacity-100'
+                    onClick={start}
+                    aria-label={`Edit ${row.label}`}
+                  >
+                    <Pencil className='size-3' />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Change it now</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant='ghost'
+                    size='sm'
+                    className='h-4 w-4 p-0 opacity-0 transition-opacity group-hover:opacity-60 hover:opacity-100'
+                    onClick={() => onOverride(row)}
+                    aria-label={`Override ${row.label} with a reason`}
+                  >
+                    <SlidersHorizontal className='size-3' />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Override — weigh it first, and record why</TooltipContent>
+              </Tooltip>
+            </>
           ) : null}
         </div>
       </div>

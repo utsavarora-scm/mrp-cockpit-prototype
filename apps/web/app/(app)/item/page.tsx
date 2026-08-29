@@ -1,120 +1,262 @@
 'use client';
 
 /**
- * Item 360 without an item chosen yet.
+ * The materials table.
  *
- * Rather than an empty search box, this lands on the item-plants that currently
- * carry the most exposure — which is where a planner would go anyway.
+ * One row per planned item-plant, in the columns a planner reads across before
+ * opening anything: what is wanted, what is held, what is ordered, how much of
+ * that is genuinely coming, and where the balance lands. Rolling the exception
+ * queue up by item answered a different question — it could only ever show
+ * materials that already had a problem, which is no way to see a position.
+ *
+ * Sorted trouble-first, so the top of the table is always the work.
  */
 
-import { formatCurrency, formatNumber } from '@repo/domain';
+import { formatCurrency, formatDateShort, formatNumber } from '@repo/domain';
+import { Badge } from '@repo/ui/components/badge';
+import { Button } from '@repo/ui/components/button';
 import { Input } from '@repo/ui/components/input';
 import { Skeleton } from '@repo/ui/components/skeleton';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@repo/ui/components/tooltip';
+import { cn } from '@repo/ui/lib/utils';
 import { useQuery } from '@tanstack/react-query';
 import { Search } from 'lucide-react';
 import Link from 'next/link';
-import { useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useState } from 'react';
 
-import type { ExceptionQueryResult } from '@/lib/api-types';
+import type { MaterialRow, MaterialsQueryResult } from '@/lib/api-types';
 
-export default function ItemIndexPage() {
+type StatusFilter = 'ALL' | MaterialRow['status'];
+
+const STATUS_LABEL: Record<MaterialRow['status'], string> = {
+  AT_RISK: 'At risk',
+  WATCH: 'Watch',
+  EXCESS: 'Excess',
+  HEALTHY: 'Healthy',
+};
+
+function statusClass(status: MaterialRow['status']): string {
+  if (status === 'AT_RISK') return 'sev-critical';
+  if (status === 'WATCH') return 'sev-high';
+  if (status === 'EXCESS') return 'sev-medium';
+  return 'sev-low';
+}
+
+export default function MaterialsPage() {
+  return (
+    <Suspense fallback={<div className='p-4' />}>
+      <MaterialsTable />
+    </Suspense>
+  );
+}
+
+function MaterialsTable() {
+  const searchParams = useSearchParams();
   const [search, setSearch] = useState('');
+  const [chosen, setChosen] = useState<StatusFilter | null>(null);
 
-  const exceptions = useQuery({
-    queryKey: ['exceptions', 'item-index', search],
-    queryFn: async (): Promise<ExceptionQueryResult> => {
-      const params = new URLSearchParams({ scenario: 'baseline', limit: '400' });
+  // The cockpit tiles link straight in with a filter already applied. Derived
+  // rather than synced into state, so arriving from a tile and then clicking a
+  // filter both work without an effect racing the first render.
+  const requested = searchParams.get('status');
+  const status: StatusFilter = chosen ?? (requested && requested in STATUS_LABEL ? (requested as StatusFilter) : 'ALL');
+  const setStatus = setChosen;
+
+  const materials = useQuery({
+    queryKey: ['materials', search, status],
+    queryFn: async (): Promise<MaterialsQueryResult> => {
+      const params = new URLSearchParams({ scenario: 'baseline', limit: '250' });
       if (search) params.set('search', search);
-      const response = await fetch(`/api/exceptions?${params.toString()}`);
-      if (!response.ok) throw new Error('The item list could not be loaded.');
+      if (status !== 'ALL') params.set('status', status);
+      const response = await fetch(`/api/materials?${params.toString()}`);
+      if (!response.ok) throw new Error('The materials table could not be loaded.');
       return response.json();
     },
     placeholderData: (previous) => previous,
   });
 
-  /** Roll the queue up to one row per item-plant. */
-  const items = useMemo(() => {
-    const byKey = new Map<
-      string,
-      { itemId: string; plantId: string; description: string; itemType: string; exposure: number; count: number }
-    >();
-    for (const row of exceptions.data?.rows ?? []) {
-      if (row.itemId === '—') continue;
-      const key = `${row.itemId}@${row.plantId}`;
-      const existing = byKey.get(key);
-      if (existing) {
-        existing.exposure += row.impactValue;
-        existing.count += 1;
-      } else {
-        byKey.set(key, {
-          itemId: row.itemId,
-          plantId: row.plantId,
-          description: row.itemDescription,
-          itemType: row.itemType,
-          exposure: row.impactValue,
-          count: 1,
-        });
-      }
-    }
-    return [...byKey.values()].sort((a, b) => b.exposure - a.exposure).slice(0, 120);
-  }, [exceptions.data]);
+  const counts = materials.data?.counts;
+  const filters: Array<{ value: StatusFilter; label: string; count: number | undefined }> = [
+    { value: 'ALL', label: 'All', count: counts?.all },
+    { value: 'AT_RISK', label: 'At risk', count: counts?.atRisk },
+    { value: 'WATCH', label: 'Watch', count: counts?.watch },
+    { value: 'EXCESS', label: 'Excess', count: counts?.excess },
+    { value: 'HEALTHY', label: 'Healthy', count: counts?.healthy },
+  ];
 
   return (
-    <div className='mx-auto max-w-4xl px-4 py-5'>
-      <h1 className='text-[15px] font-semibold'>Item 360</h1>
-      <p className='text-muted-foreground mt-0.5 text-[12.5px]'>
-        The items carrying the most exposure right now. Search to find any other.
-      </p>
-
-      <div className='relative mt-3'>
-        <Search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2' />
-        <Input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder='Item code, description or site'
-          className='h-8 pl-8 text-[13px]'
-          aria-label='Search items'
-        />
-      </div>
-
-      <div className='mt-3 rounded-md border'>
-        <div className='bg-muted/40 flex border-b'>
-          <div className='grid-head w-[92px] text-right'>Exposure</div>
-          <div className='grid-head w-[116px]'>Item</div>
-          <div className='grid-head flex-1'>Description</div>
-          <div className='grid-head w-[52px]'>Site</div>
-          <div className='grid-head w-[52px]'>Type</div>
-          <div className='grid-head w-[60px] text-right'>Issues</div>
+    <div className='flex h-[calc(100svh-3rem)] flex-col'>
+      <div className='flex items-center gap-3 border-b px-4 py-2'>
+        <div>
+          <h1 className='text-[13px] font-semibold'>Materials</h1>
+          <p className='text-muted-foreground text-[11.5px]'>
+            The planning position for every material the engine planned. Trouble first.
+          </p>
         </div>
 
-        {exceptions.isLoading ? (
-          <div className='space-y-px p-2'>
-            {Array.from({ length: 12 }).map((_, index) => (
-              <Skeleton key={index} className='h-[30px] w-full rounded-none' />
+        <div className='ml-auto flex items-center gap-2'>
+          <div className='flex gap-0.5'>
+            {filters.map((filter) => (
+              <Button
+                key={filter.value}
+                variant={status === filter.value ? 'default' : 'ghost'}
+                size='sm'
+                className='h-6 gap-1.5 px-2 text-[11.5px]'
+                onClick={() => setStatus(filter.value)}
+              >
+                {filter.label}
+                {filter.count === undefined ? null : (
+                  <span className='mono opacity-60'>{formatNumber(filter.count)}</span>
+                )}
+              </Button>
             ))}
           </div>
-        ) : items.length === 0 ? (
-          <div className='text-muted-foreground flex h-40 flex-col items-center justify-center gap-1 text-[13px]'>
-            <span className='font-medium'>Nothing matches that search.</span>
-            <span>Try an item code such as RM-CB-001, or a site such as P1.</span>
+
+          <div className='relative w-[248px]'>
+            <Search className='text-muted-foreground pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2' />
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder='Material, description or site'
+              className='h-7 pl-7 text-[12.5px]'
+              aria-label='Search materials'
+            />
           </div>
-        ) : (
-          items.map((item) => (
-            <Link
-              key={`${item.itemId}@${item.plantId}`}
-              href={`/item/${encodeURIComponent(item.itemId)}/${encodeURIComponent(item.plantId)}`}
-              className='grid-row hover:bg-muted/40 flex items-center last:border-b-0'
-            >
-              <div className='grid-cell num w-[92px] font-semibold'>{formatCurrency(item.exposure)}</div>
-              <div className='grid-cell mono w-[116px] text-[12px]'>{item.itemId}</div>
-              <div className='grid-cell text-muted-foreground flex-1 truncate'>{item.description}</div>
-              <div className='grid-cell mono w-[52px]'>{item.plantId}</div>
-              <div className='grid-cell mono w-[52px] text-[11.5px]'>{item.itemType}</div>
-              <div className='grid-cell num w-[60px]'>{formatNumber(item.count)}</div>
-            </Link>
-          ))
-        )}
+        </div>
       </div>
+
+      <div className='min-h-0 flex-1 overflow-auto'>
+        <table className='w-full border-separate border-spacing-0'>
+          <thead className='sticky top-0 z-10'>
+            <tr>
+              <Th className='w-[118px] text-left'>Material</Th>
+              <Th className='text-left'>Description</Th>
+              <Th className='w-[46px] text-left'>Site</Th>
+              <Th className='w-[44px] text-left'>Type</Th>
+              <Th className='w-[96px] text-right'>Demand</Th>
+              <Th className='w-[96px] text-right'>Stock</Th>
+              <Th className='w-[96px] text-right'>Open PO</Th>
+              <Th className='w-[110px] text-right'>Expected inbound</Th>
+              <Th className='w-[96px] text-right'>Safety stock</Th>
+              <Th className='w-[104px] text-right'>Projected balance</Th>
+              <Th className='w-[86px] text-left'>Stock-out</Th>
+              <Th className='w-[78px] text-left'>Status</Th>
+              <Th className='w-[86px] text-right'>Exposure</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {materials.isLoading ? (
+              Array.from({ length: 18 }).map((_, index) => (
+                <tr key={index}>
+                  <td colSpan={13} className='px-2 py-1'>
+                    <Skeleton className='h-[22px] w-full' />
+                  </td>
+                </tr>
+              ))
+            ) : materials.data && materials.data.rows.length > 0 ? (
+              materials.data.rows.map((row) => <MaterialRowView key={`${row.itemId}@${row.plantId}`} row={row} />)
+            ) : (
+              <tr>
+                <td colSpan={13} className='text-muted-foreground px-4 py-16 text-center text-[13px]'>
+                  <div className='font-medium'>Nothing matches that.</div>
+                  <div className='mt-0.5'>Try a material code such as RM-CB-001, or a site such as P1.</div>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {materials.data ? (
+        <div className='text-muted-foreground border-t px-4 py-1.5 text-[11.5px]'>
+          Showing <span className='mono text-foreground'>{formatNumber(materials.data.rows.length)}</span> of{' '}
+          <span className='mono text-foreground'>{formatNumber(materials.data.total)}</span> materials
+          {status !== 'ALL' ? ` in ${STATUS_LABEL[status].toLowerCase()}` : ''}.
+        </div>
+      ) : null}
     </div>
   );
+}
+
+function Th({ children, className }: { children?: React.ReactNode; className?: string }) {
+  return <th className={cn('grid-head bg-muted/60 border-b', className)}>{children}</th>;
+}
+
+function MaterialRowView({ row }: { row: MaterialRow }) {
+  // Open PO the supplier has not committed to is the gap this table exists to
+  // expose, so it is marked on the row rather than left to the detail screen.
+  const uncommitted = row.openPo - row.expectedInbound;
+
+  return (
+    <tr className='hover:bg-muted/40 group'>
+      <Td className='mono text-left text-[12px]'>
+        <Link href={`/item/${encodeURIComponent(row.itemId)}/${encodeURIComponent(row.plantId)}`} className='block'>
+          {row.itemId}
+        </Link>
+      </Td>
+      <Td className='text-muted-foreground max-w-0 truncate text-left'>
+        <Link
+          href={`/item/${encodeURIComponent(row.itemId)}/${encodeURIComponent(row.plantId)}`}
+          className='block truncate'
+        >
+          {row.description}
+        </Link>
+      </Td>
+      <Td className='mono text-left'>{row.plantId}</Td>
+      <Td className='mono text-left text-[11.5px]'>{row.itemType}</Td>
+      <Td className='num'>{formatNumber(row.demand)}</Td>
+      <Td className='num'>{formatNumber(row.stock)}</Td>
+      <Td className='num'>{row.openPo > 0 ? formatNumber(row.openPo) : <Dash />}</Td>
+      <Td className='num'>
+        {row.openPo > 0 ? (
+          uncommitted > 0.5 ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className='text-primary cursor-help'>{formatNumber(row.expectedInbound)}</span>
+              </TooltipTrigger>
+              <TooltipContent>
+                {formatNumber(uncommitted)} {row.baseUom} on order with no supplier commitment behind it.
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            formatNumber(row.expectedInbound)
+          )
+        ) : (
+          <Dash />
+        )}
+      </Td>
+      <Td className='num text-muted-foreground'>{formatNumber(row.safetyStock)}</Td>
+      <Td
+        className={cn(
+          'num font-semibold',
+          row.projectedBalance < 0 && 'text-destructive',
+          row.projectedBalance >= 0 && row.projectedBalance < row.safetyStock && 'text-primary',
+        )}
+      >
+        {formatNumber(row.projectedBalance)}
+      </Td>
+      <Td className='mono text-destructive text-left'>
+        {row.stockoutDate ? formatDateShort(row.stockoutDate) : <Dash />}
+      </Td>
+      <Td className='text-left'>
+        <Badge variant='outline' className={cn('h-4 px-1 text-[10px] font-normal', statusClass(row.status))}>
+          {STATUS_LABEL[row.status]}
+        </Badge>
+      </Td>
+      <Td className='num'>{row.exposure > 0 ? formatCurrency(row.exposure) : <Dash />}</Td>
+    </tr>
+  );
+}
+
+function Td({ children, className }: { children: React.ReactNode; className?: string }) {
+  return (
+    <td className={cn('grid-cell border-b border-b-[color-mix(in_oklab,var(--border)_70%,transparent)]', className)}>
+      {children}
+    </td>
+  );
+}
+
+function Dash() {
+  return <span className='text-muted-foreground/40'>—</span>;
 }

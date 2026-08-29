@@ -17,6 +17,7 @@ import {
   type ItemVendor,
   type MrpOptions,
   type MrpResult,
+  type PlannedOrderExplanation,
   type PlanningException,
   type PlanningSnapshot,
   type Resolution,
@@ -196,6 +197,7 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
   const ordersByKey = new Map<string, PlannedOrderDraft[]>();
   const supersededByKey = new Map<string, SupersededRequirement[]>();
   const plannedOrders: SupplyElement[] = [];
+  const orderExplanations = new Map<string, PlannedOrderExplanation[]>();
 
   for (const key of order) {
     const plan = plans.get(key);
@@ -253,6 +255,30 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
 
     if (result.orders.length > 0) ordersByKey.set(key, result.orders);
     if (result.superseded.length > 0) supersededByKey.set(key, result.superseded);
+
+    // Keep the working, not just the answer. `threshold − netRequirement` is
+    // the balance netting was topping up from, which is the figure a planner
+    // asking "why this quantity?" actually wants to see.
+    if (result.orders.length > 0) {
+      orderExplanations.set(
+        key,
+        result.orders.map((draft) => ({
+          itemId: draft.itemId,
+          plantId: draft.plantId,
+          qty: draft.qty,
+          ruleQty: draft.ruleQty,
+          netRequirement: draft.netRequirement,
+          threshold: result.threshold,
+          balanceBefore: result.threshold - draft.netRequirement,
+          requirementDay: draft.receiptDay,
+          receiptDate: fromEpochDay(draft.receiptEpochDay),
+          releaseDate: fromEpochDay(draft.releaseEpochDay),
+          isReleaseInPast: draft.isReleaseInPast,
+          effectiveLeadTimeDays: draft.effectiveLeadTimeDays,
+          totalOffsetDays: draft.totalOffsetDays,
+        }))
+      );
+    }
 
     for (let index = 0; index < result.orders.length; index += 1) {
       const draft = result.orders[index] as PlannedOrderDraft;
@@ -382,6 +408,7 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     elapsedMs: performanceNow() - startedAt,
     plans,
     plannedOrders,
+    orderExplanations,
     derivedDemand,
     exceptions,
     resolutions,

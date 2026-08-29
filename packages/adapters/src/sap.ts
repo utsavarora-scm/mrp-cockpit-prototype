@@ -277,6 +277,23 @@ export function buildSapWriteback(mutation: SnapshotMutation, planningDate: stri
         },
       };
 
+    case 'RESCHEDULE_DELIVERY_LINE':
+      // The schedule line is the record SAP actually keys the delivery on, so a
+      // per-drop move maps onto exactly one line rather than the whole item.
+      return {
+        system: 'SAP',
+        method: 'PATCH',
+        endpoint: `/sap/opu/odata/sap/API_PURCHASEORDER_PROCESS_SRV/A_PurchaseOrderScheduleLine(PurchaseOrder='${mutation.supplyElementId}',PurchaseOrderItem='00010',ScheduleLine='${String(mutation.line).padStart(4, '0')}')`,
+        description: mutation.confirmed
+          ? 'Move the delivery schedule line and record the supplier confirmation'
+          : 'Move the delivery schedule line',
+        body: {
+          ScheduleLineDeliveryDate: mutation.newDate,
+          ScheduleLineOrderQuantity: mutation.newQty,
+          ConfirmationStatus: mutation.confirmed ? 'CONFIRMED' : undefined,
+        },
+      };
+
     case 'CANCEL_SUPPLY':
       return {
         system: 'SAP',

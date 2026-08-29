@@ -31,6 +31,23 @@ export type SnapshotMutation =
   | { kind: 'SET_LOT_SIZE_RULE'; itemId: string; plantId: string; value: LotSizeRule }
   | { kind: 'CREATE_ITEM_PLANT'; itemId: string; plantId: string; template: 'FROM_SIMILAR' | 'DEFAULT' }
   | { kind: 'RESCHEDULE_SUPPLY'; supplyElementId: string; newDueDate: string }
+  | {
+      /**
+       * Move one delivery bucket of an order, rather than the order as a whole.
+       *
+       * Rescheduling the whole PO when only the second drop has slipped
+       * overstates the problem by the quantity of every drop that is fine. The
+       * order's own due date follows the latest line, so the engine keeps
+       * netting against the date the last of it actually arrives.
+       */
+      kind: 'RESCHEDULE_DELIVERY_LINE';
+      supplyElementId: string;
+      line: number;
+      newDate: string;
+      newQty?: number;
+      /** Set to record that the supplier has now committed to this line. */
+      confirmed?: boolean;
+    }
   | { kind: 'CANCEL_SUPPLY'; supplyElementId: string }
   | { kind: 'EXPEDITE_SUPPLY'; supplyElementId: string; newDueDate: string; premiumCost: number }
   | {

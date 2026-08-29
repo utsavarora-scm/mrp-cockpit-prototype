@@ -8,7 +8,7 @@
  * answer to "change that number and re-run it".
  */
 
-import { EXCEPTION_LABELS, formatCurrency, formatNumber, formatQty } from '@repo/domain';
+import { EXCEPTION_LABELS, formatCurrency, formatDateShort, formatNumber, formatQty } from '@repo/domain';
 import { Badge } from '@repo/ui/components/badge';
 import { Button } from '@repo/ui/components/button';
 import { Skeleton } from '@repo/ui/components/skeleton';
@@ -16,18 +16,26 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Network } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
+import { useState } from 'react';
 import { toast } from 'sonner';
 
-import type { ItemDetail } from '@/lib/api-types';
+import type { ItemDetail, OverridePreview, ParameterHealth } from '@/lib/api-types';
+import { OverrideDialog } from '@/components/item/OverrideDialog';
 import { PabChart } from '@/components/item/PabChart';
 import { ParameterRail } from '@/components/item/ParameterRail';
+import { PositionBar } from '@/components/item/PositionBar';
+import { PoSchedule, type ScheduleEdit } from '@/components/item/PoSchedule';
 import { TimePhasedGrid } from '@/components/item/TimePhasedGrid';
+import { WhyPanel } from '@/components/item/WhyPanel';
 
 export default function Item360Page() {
   const params = useParams<{ itemId: string; plantId: string }>();
   const itemId = decodeURIComponent(params.itemId);
   const plantId = decodeURIComponent(params.plantId);
   const queryClient = useQueryClient();
+
+  const [overriding, setOverriding] = useState<ParameterHealth | null>(null);
+  const [preview, setPreview] = useState<OverridePreview | null>(null);
 
   const detail = useQuery({
     queryKey: ['item', itemId, plantId],
@@ -38,22 +46,72 @@ export default function Item360Page() {
     },
   });
 
+  /** Everything else on the board moved too, so nothing may be left cached. */
+  const invalidateBoard = async () => {
+    await queryClient.invalidateQueries({ queryKey: ['plan-summary'] });
+    await queryClient.invalidateQueries({ queryKey: ['exceptions'] });
+    await queryClient.invalidateQueries({ queryKey: ['materials'] });
+  };
+
   const edit = useMutation({
-    mutationFn: async ({ field, value }: { field: string; value: number | null }): Promise<ItemDetail> => {
+    mutationFn: async ({
+      field,
+      value,
+      reason,
+    }: {
+      field: string;
+      value: number | null;
+      reason?: string;
+    }): Promise<ItemDetail> => {
       const response = await fetch(`/api/items/${encodeURIComponent(itemId)}/${encodeURIComponent(plantId)}/mutate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ field, value }),
+        body: JSON.stringify({ field, value, reason }),
       });
       if (!response.ok) throw new Error((await response.json()).error ?? 'That edit could not be applied.');
       return response.json();
     },
     onSuccess: async (updated, variables) => {
       queryClient.setQueryData(['item', itemId, plantId], updated);
-      // The whole plan moved, so every other screen's data is stale.
-      await queryClient.invalidateQueries({ queryKey: ['plan-summary'] });
-      await queryClient.invalidateQueries({ queryKey: ['exceptions'] });
+      await invalidateBoard();
+      setOverriding(null);
+      setPreview(null);
       toast.success(`${variables.field} updated — plan re-run`, {
+        description: `${updated.exceptions.length} exception${updated.exceptions.length === 1 ? '' : 's'} now on this item.`,
+      });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  /** Weigh an override without committing it — a real run on a cloned snapshot. */
+  const weigh = useMutation({
+    mutationFn: async ({ field, value }: { field: string; value: number | null }): Promise<OverridePreview> => {
+      const response = await fetch(`/api/items/${encodeURIComponent(itemId)}/${encodeURIComponent(plantId)}/mutate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field, value, preview: true }),
+      });
+      if (!response.ok) throw new Error((await response.json()).error ?? 'That change could not be weighed.');
+      return response.json();
+    },
+    onSuccess: setPreview,
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const reschedule = useMutation({
+    mutationFn: async (change: ScheduleEdit): Promise<ItemDetail> => {
+      const response = await fetch(`/api/items/${encodeURIComponent(itemId)}/${encodeURIComponent(plantId)}/schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(change),
+      });
+      if (!response.ok) throw new Error((await response.json()).error ?? 'That delivery could not be moved.');
+      return response.json();
+    },
+    onSuccess: async (updated, variables) => {
+      queryClient.setQueryData(['item', itemId, plantId], updated);
+      await invalidateBoard();
+      toast.success(`${variables.supplyElementId} delivery ${variables.line} moved — plan re-run`, {
         description: `${updated.exceptions.length} exception${updated.exceptions.length === 1 ? '' : 's'} now on this item.`,
       });
     },
@@ -104,6 +162,12 @@ export default function Item360Page() {
           </Badge>
         </div>
 
+        {item.position.stockoutDate ? (
+          <Badge variant='outline' className='sev-critical h-5 px-1.5 text-[11px] font-medium'>
+            Projected stock-out {formatDateShort(item.position.stockoutDate)}
+          </Badge>
+        ) : null}
+
         <div className='text-muted-foreground ml-auto flex items-center gap-4 text-[11.5px]'>
           <Stat label='Site' value={item.plantId} />
           <Stat label='Planner' value={item.plannerCode ?? '—'} />
@@ -111,8 +175,13 @@ export default function Item360Page() {
           <Stat label='BOM level' value={String(item.lowLevelCode)} />
           <Stat label='Std cost' value={formatCurrency(item.standardCost)} />
           <Stat label='On hand' value={formatQty(totalStock, item.baseUom)} />
+          {item.recommendation ? (
+            <WhyPanel explain={item.recommendation} uom={item.baseUom} itemId={item.itemId} />
+          ) : null}
         </div>
       </div>
+
+      <PositionBar detail={item} />
 
       <div className='flex items-center gap-4 border-b px-4 py-1.5 text-[11.5px]'>
         <StockSplit label='Unrestricted' value={item.stock.unrestricted} uom={item.baseUom} />
@@ -159,15 +228,35 @@ export default function Item360Page() {
             </div>
           )}
 
+          <PoSchedule detail={item} onEdit={(change) => reschedule.mutate(change)} isSaving={reschedule.isPending} />
+
           <TimePhasedGrid detail={item} />
         </div>
 
         <ParameterRail
           detail={item}
           onEdit={(field, value) => edit.mutate({ field, value })}
+          onOverride={(parameter) => {
+            setPreview(null);
+            setOverriding(parameter);
+          }}
           isSaving={edit.isPending}
         />
       </div>
+
+      <OverrideDialog
+        parameter={overriding}
+        uom={item.baseUom}
+        preview={preview}
+        isPreviewing={weigh.isPending}
+        isSaving={edit.isPending}
+        onPreview={(value) => overriding && weigh.mutate({ field: overriding.field, value })}
+        onApply={(value, reason) => overriding && edit.mutate({ field: overriding.field, value, reason })}
+        onClose={() => {
+          setOverriding(null);
+          setPreview(null);
+        }}
+      />
     </div>
   );
 }

@@ -10,7 +10,7 @@ import { NextResponse } from 'next/server';
 import type { SnapshotMutation } from '@repo/domain';
 
 import { commitChange } from '@/lib/server/planning-session';
-import { itemDetail } from '@/lib/server/projections';
+import { itemDetail, previewOverride } from '@/lib/server/projections';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,7 +35,15 @@ export async function POST(request: Request, context: { params: Promise<{ itemId
   const itemId = decodeURIComponent(rawItem);
   const plantId = decodeURIComponent(rawPlant);
 
-  const body = (await request.json()) as { field?: string; value?: number | null; scenario?: string };
+  const body = (await request.json()) as {
+    field?: string;
+    value?: number | null;
+    scenario?: string;
+    /** Weigh the change without committing it. */
+    preview?: boolean;
+    /** Why the planner is overriding the system value. Recorded on the change. */
+    reason?: string;
+  };
   const scenarioId = body.scenario ?? 'baseline';
 
   if (!body.field || !EDITABLE_FIELDS.has(body.field)) {
@@ -48,18 +56,31 @@ export async function POST(request: Request, context: { params: Promise<{ itemId
     return NextResponse.json({ error: 'That value is not a number the plan can use.' }, { status: 400 });
   }
 
+  const field = body.field as Extract<SnapshotMutation, { kind: 'SET_ITEM_PLANT_PARAM' }>['field'];
+
+  // Weighing it is a real run on a cloned snapshot — nothing is committed, and
+  // the planner sees the same arithmetic they would get by applying it.
+  if (body.preview) {
+    const preview = previewOverride(scenarioId, itemId, plantId, field, body.value ?? null);
+    if (!preview) return NextResponse.json({ error: 'That item has no planning master to override.' }, { status: 404 });
+    return NextResponse.json(preview);
+  }
+
   const mutation: SnapshotMutation = {
     kind: 'SET_ITEM_PLANT_PARAM',
     itemId,
     plantId,
-    field: body.field as Extract<SnapshotMutation, { kind: 'SET_ITEM_PLANT_PARAM' }>['field'],
+    field,
     value: body.value ?? null,
   };
 
+  const reason = body.reason?.trim();
   commitChange({
     exceptionId: '—',
     resolutionId: '—',
-    label: `${body.field} set to ${body.value ?? 'not maintained'} on ${itemId} at ${plantId}`,
+    label: `${body.field} set to ${body.value ?? 'not maintained'} on ${itemId} at ${plantId}${
+      reason ? ` — ${reason}` : ''
+    }`,
     mutations: [mutation],
     appliedByAgent: false,
     estimatedImpact: 0,

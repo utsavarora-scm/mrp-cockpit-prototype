@@ -46,6 +46,40 @@ export interface ItemPlantPlan {
   daysOfCover: Float64Array;
 }
 
+/**
+ * The working behind one recommended order.
+ *
+ * Netting knows why it raised an order — the threshold it was defending, the
+ * balance it found, and what lot sizing then did to the shortfall — and then
+ * throws all of it away, leaving a quantity with no provenance. Keeping the
+ * working is what lets a planner ask "why this quantity?" and get an answer
+ * from the run rather than from a recalculation that might not agree with it.
+ */
+export interface PlannedOrderExplanation {
+  itemId: string;
+  plantId: string;
+  /** The quantity actually recommended, after lot sizing, MOQ and rounding. */
+  qty: number;
+  /** What the lot-sizing rule alone asked for, before MOQ and rounding. */
+  ruleQty: number;
+  /** Threshold − balance at the bucket that triggered the order. */
+  netRequirement: number;
+  /** Safety stock, or the reorder point for consumption-based items. */
+  threshold: number;
+  /** The balance the order is topping up from. */
+  balanceBefore: number;
+  /** Day offset of the bucket that breached. */
+  requirementDay: number;
+  receiptDate: string;
+  releaseDate: string;
+  /** True when the release date has already passed — the order is unorderable. */
+  isReleaseInPast: boolean;
+  /** Lead time the run actually used: maintained, or observed under that scenario. */
+  effectiveLeadTimeDays: number;
+  /** Lead time plus goods-receipt processing plus safety time. */
+  totalOffsetDays: number;
+}
+
 export interface PeggingAllocation {
   demandElementId: string;
   supplyElementId: string | null;
@@ -97,6 +131,8 @@ export interface MrpResult {
   elapsedMs: number;
   plans: Map<string, ItemPlantPlan>;
   plannedOrders: SupplyElement[];
+  /** Keyed by `planKey` — the working behind each item-plant's recommendations. */
+  orderExplanations: Map<string, PlannedOrderExplanation[]>;
   /** Dependent demand the engine generated while exploding BOMs. */
   derivedDemand: DemandElement[];
   exceptions: PlanningException[];

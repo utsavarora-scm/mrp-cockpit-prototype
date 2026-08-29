@@ -20,6 +20,36 @@ export interface StockPosition {
 
 export type SupplyType = 'PO' | 'PRODUCTION_ORDER' | 'PLANNED_ORDER' | 'STO';
 
+/**
+ * How far along the inbound pipeline a single delivery has got.
+ *
+ * PO created → supplier committed → in transit → received. `DELAYED` is the one
+ * that matters: a line whose expected date has already slipped past the date the
+ * plan is netting against, so the receipt the plan is counting on will not be
+ * there when it assumes.
+ */
+export type DeliveryStatus = 'PLANNED' | 'CONFIRMED' | 'IN_TRANSIT' | 'RECEIVED' | 'DELAYED';
+
+/**
+ * One delivery bucket of an order.
+ *
+ * An order is rarely a single drop. Holding the schedule rather than a single
+ * quantity and date is what lets the cockpit answer "1,000 units by when,
+ * exactly" — and show that half of it is committed and half is not.
+ */
+export interface DeliveryLine {
+  /** 1-based, in date order. */
+  line: number;
+  qty: number;
+  /** The date the order document says. */
+  plannedDate: string;
+  /** The date the supplier has committed to, where they have committed at all. */
+  confirmedDate: string | null;
+  /** Best current view of arrival — the confirmed date where there is one. */
+  expectedDate: string;
+  status: DeliveryStatus;
+}
+
 export interface SupplyElement {
   id: string;
   type: SupplyType;
@@ -33,6 +63,14 @@ export interface SupplyElement {
   sourcePlantId: string | null;
   isFirm: boolean;
   sourceSystem: 'SAP' | 'KINAXIS' | 'ENGINE';
+  /**
+   * The delivery buckets this order is split into. Absent on planned orders,
+   * which have not been placed and so have nothing to schedule yet.
+   *
+   * Quantities always sum to `qty` and the last line always lands on `dueDate`,
+   * so the engine's view of this order is unchanged by the split.
+   */
+  schedule?: DeliveryLine[];
 }
 
 export type DemandType = 'SALES_ORDER' | 'FORECAST' | 'DEPENDENT' | 'STO_DEMAND' | 'SAFETY_STOCK';

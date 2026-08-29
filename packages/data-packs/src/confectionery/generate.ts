@@ -40,6 +40,7 @@ import {
   type Vendor,
 } from '@repo/domain';
 
+import { attachDeliverySchedules } from '../delivery-schedule';
 import { streamFactory, type Rng } from '../prng';
 import { CONFECTIONERY_SPEC } from './spec';
 
@@ -173,6 +174,11 @@ export function generateConfectionerySnapshot(): PlanningSnapshot {
     planningDate,
   };
   applyPlantedScenarios(stream('planted'), context);
+
+  // Delivery buckets, last so the planted orders get one too. Derived from each
+  // order's own fields rather than from `stream`, which is what keeps the rest
+  // of the seeded dataset identical.
+  attachDeliverySchedules(context.supply, planningDate);
 
   const systemSnapshots = buildSystemSnapshots(
     stream('systems'),
@@ -1522,18 +1528,43 @@ function applyPlantedScenarios(rng: Rng, ctx: PlantedContext): void {
   if (driftPerDay > 0) {
     // The one open order, arriving day 9 — enough to mask the gap briefly and
     // then leave it wide open, which is what makes the trace legible.
+    const driftPoQty = roundSensibly(driftPerDay * 10, driftPerDay);
+    const firstDrop = roundSensibly(driftPoQty / 2, driftPerDay);
+
     ctx.supply.push({
       id: 'PO-4500071288',
       type: 'PO',
       itemId: drift.itemId,
       plantId: drift.plantId,
-      qty: roundSensibly(driftPerDay * 10, driftPerDay),
+      qty: driftPoQty,
       dueDate: addDays(ctx.planningDate, 9),
       releaseDate: addDays(ctx.planningDate, -12),
       vendorId: drift.vendorId,
       sourcePlantId: null,
       isFirm: true,
       sourceSystem: 'SAP',
+      // Spelled out rather than derived: this is the order the demo opens, and
+      // the split has to make the point. Half of it the supplier has committed
+      // to, half of it they have not answered on — and the plan is netting
+      // against the whole quantity as though both were certain.
+      schedule: [
+        {
+          line: 1,
+          qty: firstDrop,
+          plannedDate: addDays(ctx.planningDate, 4),
+          confirmedDate: addDays(ctx.planningDate, 4),
+          expectedDate: addDays(ctx.planningDate, 4),
+          status: 'IN_TRANSIT',
+        },
+        {
+          line: 2,
+          qty: driftPoQty - firstDrop,
+          plannedDate: addDays(ctx.planningDate, 9),
+          confirmedDate: null,
+          expectedDate: addDays(ctx.planningDate, 9),
+          status: 'PLANNED',
+        },
+      ],
     });
   }
 

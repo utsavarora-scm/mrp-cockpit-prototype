@@ -24,7 +24,7 @@ import type { CockpitSummary } from '@/lib/api-types';
 
 const TABS = [
   { href: '/', label: 'Cockpit', match: (path: string) => path === '/' },
-  { href: '/item', label: 'Item 360', match: (path: string) => path.startsWith('/item') },
+  { href: '/item', label: 'Materials', match: (path: string) => path.startsWith('/item') },
   { href: '/exceptions', label: 'Resolve', match: (path: string) => path.startsWith('/exceptions') },
   { href: '/blast', label: 'Blast radius', match: (path: string) => path.startsWith('/blast') },
   { href: '/master-data', label: 'Master data', match: (path: string) => path.startsWith('/master-data') },

@@ -138,6 +138,41 @@ export function applyMutations(base: PlanningSnapshot, mutations: SnapshotMutati
         }));
         break;
       }
+      case 'RESCHEDULE_DELIVERY_LINE': {
+        replaceSupply(next, mutation.supplyElementId, (record) => {
+          const schedule = (record.schedule ?? []).map((line) =>
+            line.line !== mutation.line
+              ? line
+              : {
+                  ...line,
+                  qty: mutation.newQty ?? line.qty,
+                  plannedDate: mutation.newDate,
+                  confirmedDate: mutation.confirmed ? mutation.newDate : line.confirmedDate,
+                  expectedDate: mutation.newDate,
+                  status: mutation.confirmed ? ('CONFIRMED' as const) : line.status,
+                }
+          );
+
+          // The order is netted on its due date, so that has to follow the
+          // latest line. Quantity likewise: the total is the sum of the drops,
+          // and letting the two disagree would silently change what the plan
+          // believes is on order.
+          let latest = '';
+          let total = 0;
+          for (const line of schedule) {
+            if (line.expectedDate > latest) latest = line.expectedDate;
+            total += line.qty;
+          }
+
+          return {
+            ...record,
+            schedule,
+            dueDate: schedule.length > 0 ? latest : record.dueDate,
+            qty: schedule.length > 0 ? total : record.qty,
+          };
+        });
+        break;
+      }
       case 'CANCEL_SUPPLY': {
         next.supply = next.supply.filter((record) => record.id !== mutation.supplyElementId);
         break;

@@ -57,3 +57,4 @@ export function listDataPacks(): DataPack[] {
 
 export { CONFECTIONERY_COUNTS, CONFECTIONERY_SPEC };
 export { mulberry32, streamFactory, type Rng } from './prng';
+export { attachDeliverySchedules, buildDeliverySchedule } from './delivery-schedule';

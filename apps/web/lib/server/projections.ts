@@ -9,6 +9,7 @@
 import { proposeWritebacks } from '@repo/adapters';
 import {
   IMPACT_CONFIG,
+  daysBetween,
   formatDays,
   formatQty,
   fromEpochDay,
@@ -20,6 +21,7 @@ import {
   type PlanningException,
   type PlanningSnapshot,
   type Resolution,
+  type SnapshotMutation,
 } from '@repo/domain';
 import { compositeScore, reviewPeriodDays, demandStdDev, simulate } from '@repo/mrp-engine';
 
@@ -29,14 +31,22 @@ import type {
   BlastRadiusEdge,
   BlastRadiusNode,
   CockpitSummary,
+  DeliveryLineView,
   ExceptionDetail,
   ExceptionQueryResult,
   ExceptionRow,
   FacetOption,
   ItemDetail,
+  ItemPosition,
   KpiDelta,
+  MaterialRow,
+  MaterialsQueryResult,
+  MrpExplain,
+  OverridePreview,
   ParameterHealth,
   ParetoPoint,
+  PlanningPosition,
+  PurchaseOrderView,
   ResolutionCard,
   SimulationDiff,
   TimePhasedRow,
@@ -46,6 +56,15 @@ import { dataPack, planFor, planningOptions, previousKpis, snapshotFor } from '.
 
 const PARETO_POINTS = 60;
 const SPARKLINE_BUCKETS = 32;
+
+/** Opening stock above this many times the horizon's own demand reads as excess. */
+const EXCESS_COVER_MULTIPLE = 1.35;
+
+/** Balance below this share of safety stock is a watch item rather than healthy. */
+const WATCH_THRESHOLD = 1;
+
+/** Days of demand a material's stock should cover to count as comfortably held. */
+const INVENTORY_COVER_TARGET_DAYS = 30;
 
 // ---------------------------------------------------------------------------
 // Cockpit
@@ -95,6 +114,86 @@ export function cockpitSummary(scenarioId: string): CockpitSummary {
     exposureByClass: plan.kpis.exposureByClass,
     pareto,
     sparklines: buildKpiSparklines(plan),
+    planningPosition: planningPosition(scenarioId),
+  };
+}
+
+/**
+ * The plan's standing position, counted rather than valued.
+ *
+ * Walked once over the item-plants and once over open supply, both of which the
+ * cockpit is already paying to hold in memory, so this costs a pass and no
+ * extra planning.
+ */
+export function planningPosition(scenarioId: string): PlanningPosition {
+  const plan = planFor(scenarioId);
+  const snapshot = snapshotFor(scenarioId);
+
+  const atRiskKeys = new Set<string>();
+  for (const exception of plan.exceptions) {
+    if (exception.itemId === '—') continue;
+    atRiskKeys.add(planKey(exception.itemId, exception.plantId));
+  }
+
+  let projectedStockouts = 0;
+  let excessMaterials = 0;
+  let coveredByInventory = 0;
+  let aboveSafety = 0;
+  let planned = 0;
+
+  for (const [, itemPlan] of plan.plans) {
+    planned += 1;
+    const horizon = itemPlan.projectedAvailableFeasible.length - 1;
+
+    let lowest = Number.POSITIVE_INFINITY;
+    let demand = 0;
+    for (let day = 0; day <= horizon; day += 1) {
+      const balance = itemPlan.projectedAvailableFeasible[day] as number;
+      if (balance < lowest) lowest = balance;
+      demand += itemPlan.grossRequirements[day] as number;
+    }
+
+    if (lowest < 0) projectedStockouts += 1;
+    // Excess is judged against what the horizon will actually consume, not
+    // against the buffer: an item can sit far above safety stock and still be
+    // exactly right if demand is about to take it.
+    if (demand > 0 && itemPlan.openingStock > demand * EXCESS_COVER_MULTIPLE) excessMaterials += 1;
+    // The four coverage measures read as a progression, from now to the end of
+    // the horizon: stock in hand today, demand the plan can serve, materials
+    // that never go negative, materials that never breach the buffer.
+    //
+    // Inventory is measured as days of cover rather than against safety stock
+    // or against the whole horizon. Both of those are degenerate on a normal
+    // catalogue — the first reports ~100%, the second ~6% — and a bar pinned to
+    // one end tells a planner nothing.
+    if ((itemPlan.daysOfCover[0] as number) >= INVENTORY_COVER_TARGET_DAYS) coveredByInventory += 1;
+    if (lowest >= itemPlan.safetyStock) aboveSafety += 1;
+  }
+
+  let openPos = 0;
+  let delayedInbound = 0;
+  for (const element of snapshot.supply) {
+    if (element.type === 'PO') openPos += 1;
+    for (const line of element.schedule ?? []) {
+      if (line.status === 'DELAYED') delayedInbound += 1;
+    }
+  }
+
+  const share = (count: number) => (planned > 0 ? count / planned : 0);
+
+  return {
+    mrpMaterials: planned,
+    atRisk: atRiskKeys.size,
+    projectedStockouts,
+    excessMaterials,
+    openPos,
+    delayedInbound,
+    coverage: {
+      inventory: share(coveredByInventory),
+      demand: plan.kpis.projectedFillRate,
+      supply: share(planned - projectedStockouts),
+      safetyStock: share(aboveSafety),
+    },
   };
 }
 
@@ -350,6 +449,143 @@ export function exceptionDetail(scenarioId: string, exceptionId: string): Except
 // Item 360
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Materials
+// ---------------------------------------------------------------------------
+
+export interface MaterialFilters {
+  search?: string;
+  status?: MaterialRow['status'] | 'ALL';
+  plant?: string;
+  limit?: number;
+}
+
+/**
+ * The material-level planning table.
+ *
+ * One row per planned item-plant, carrying the six figures a planner reads
+ * across before deciding whether to open anything: what is wanted, what is
+ * held, what is ordered, what is genuinely coming, where that leaves the
+ * balance, and whether that is a problem.
+ */
+export function materialsTable(scenarioId: string, filters: MaterialFilters = {}): MaterialsQueryResult {
+  const plan = planFor(scenarioId);
+  const snapshot = snapshotFor(scenarioId);
+  const planningEpochDay = toEpochDay(plan.planningDate);
+
+  const itemById = new Map(snapshot.items.map((entry) => [entry.id, entry]));
+  const masterByKey = new Map(snapshot.itemPlants.map((entry) => [planKey(entry.itemId, entry.plantId), entry]));
+  const stockByKey = new Map(snapshot.stock.map((entry) => [planKey(entry.itemId, entry.plantId), entry]));
+
+  // Open supply, split into what is ordered and what is actually committed.
+  const supplyByKey = new Map<string, { openPo: number; expected: number }>();
+  for (const element of snapshot.supply) {
+    const key = planKey(element.itemId, element.plantId);
+    const bucket = supplyByKey.get(key) ?? { openPo: 0, expected: 0 };
+    bucket.openPo += element.qty;
+    if (element.schedule && element.schedule.length > 0) {
+      for (const line of element.schedule) {
+        if (line.status === 'CONFIRMED' || line.status === 'IN_TRANSIT' || line.status === 'RECEIVED') {
+          bucket.expected += line.qty;
+        }
+      }
+    } else {
+      bucket.expected += element.qty;
+    }
+    supplyByKey.set(key, bucket);
+  }
+
+  const exceptionsByKey = new Map<string, { count: number; exposure: number }>();
+  for (const exception of plan.exceptions) {
+    if (exception.itemId === '—') continue;
+    const key = planKey(exception.itemId, exception.plantId);
+    const bucket = exceptionsByKey.get(key) ?? { count: 0, exposure: 0 };
+    bucket.count += 1;
+    bucket.exposure += exception.impactValue;
+    exceptionsByKey.set(key, bucket);
+  }
+
+  const counts = { all: 0, atRisk: 0, watch: 0, excess: 0, healthy: 0 };
+  const rows: MaterialRow[] = [];
+  const search = filters.search?.trim().toLowerCase();
+
+  for (const [key, itemPlan] of plan.plans) {
+    const item = itemById.get(itemPlan.itemId);
+    const master = masterByKey.get(key);
+    if (!item || !master) continue;
+
+    const horizon = itemPlan.projectedAvailableFeasible.length - 1;
+    let demand = 0;
+    let lowest = Number.POSITIVE_INFINITY;
+    let stockoutDay = -1;
+    for (let day = 0; day <= horizon; day += 1) {
+      demand += itemPlan.grossRequirements[day] as number;
+      const balance = itemPlan.projectedAvailableFeasible[day] as number;
+      if (balance < lowest) lowest = balance;
+      if (stockoutDay === -1 && balance < 0) stockoutDay = day;
+    }
+
+    const supply = supplyByKey.get(key) ?? { openPo: 0, expected: 0 };
+    const issues = exceptionsByKey.get(key);
+    const stock = stockByKey.get(key);
+    const safetyStock = itemPlan.safetyStock;
+
+    const status: MaterialRow['status'] =
+      stockoutDay >= 0
+        ? 'AT_RISK'
+        : demand > 0 && itemPlan.openingStock > demand * EXCESS_COVER_MULTIPLE
+          ? 'EXCESS'
+          : lowest < safetyStock * WATCH_THRESHOLD
+            ? 'WATCH'
+            : 'HEALTHY';
+
+    counts.all += 1;
+    if (status === 'AT_RISK') counts.atRisk += 1;
+    else if (status === 'WATCH') counts.watch += 1;
+    else if (status === 'EXCESS') counts.excess += 1;
+    else counts.healthy += 1;
+
+    if (filters.status && filters.status !== 'ALL' && filters.status !== status) continue;
+    if (filters.plant && itemPlan.plantId !== filters.plant) continue;
+    if (
+      search &&
+      !itemPlan.itemId.toLowerCase().includes(search) &&
+      !item.description.toLowerCase().includes(search) &&
+      !itemPlan.plantId.toLowerCase().includes(search)
+    ) {
+      continue;
+    }
+
+    rows.push({
+      itemId: itemPlan.itemId,
+      plantId: itemPlan.plantId,
+      description: item.description,
+      itemType: item.type,
+      baseUom: item.baseUom,
+      abcClass: item.abcClass,
+      plannerCode: master.plannerCode,
+      demand,
+      stock: stock?.unrestricted ?? itemPlan.openingStock,
+      openPo: supply.openPo,
+      expectedInbound: supply.expected,
+      safetyStock,
+      projectedBalance: itemPlan.projectedAvailableFeasible[horizon] as number,
+      lowestBalance: lowest === Number.POSITIVE_INFINITY ? 0 : lowest,
+      stockoutDate: stockoutDay >= 0 ? fromEpochDay(planningEpochDay + stockoutDay) : null,
+      status,
+      exceptionCount: issues?.count ?? 0,
+      exposure: issues?.exposure ?? 0,
+    });
+  }
+
+  // Trouble first, then money, so the top of the table is always the work.
+  const rank: Record<MaterialRow['status'], number> = { AT_RISK: 0, WATCH: 1, EXCESS: 2, HEALTHY: 3 };
+  rows.sort((a, b) => rank[a.status] - rank[b.status] || b.exposure - a.exposure || b.demand - a.demand);
+
+  const total = rows.length;
+  return { rows: rows.slice(0, filters.limit ?? 200), total, counts };
+}
+
 export function itemDetail(scenarioId: string, itemId: string, plantId: string): ItemDetail | null {
   const plan = planFor(scenarioId);
   const snapshot = snapshotFor(scenarioId);
@@ -432,7 +668,211 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
     parameters: parameterHealth(master, item, itemPlan, snapshot),
     exceptions,
     healthScore: healthScoreFor(master, snapshot, itemId, plantId),
+    position: itemPosition(itemPlan, snapshot, itemId, plantId, planningEpochDay),
+    purchaseOrders: purchaseOrders(snapshot, itemId, plantId),
+    recommendation: explainRecommendation(plan, snapshot, master, itemId, plantId),
   };
+}
+
+/** The planning position for one item-plant, in the terms the header reads. */
+function itemPosition(
+  itemPlan: MrpResult['plans'] extends Map<string, infer T> ? T : never,
+  snapshot: PlanningSnapshot,
+  itemId: string,
+  plantId: string,
+  planningEpochDay: number,
+): ItemPosition {
+  const horizon = itemPlan.projectedAvailableFeasible.length - 1;
+
+  let demand = 0;
+  let plannedReceipts = 0;
+  let lowest = Number.POSITIVE_INFINITY;
+  let stockoutDay = -1;
+  for (let day = 0; day <= horizon; day += 1) {
+    demand += itemPlan.grossRequirements[day] as number;
+    plannedReceipts += itemPlan.plannedReceipts[day] as number;
+    const balance = itemPlan.projectedAvailableFeasible[day] as number;
+    if (balance < lowest) lowest = balance;
+    if (stockoutDay === -1 && balance < 0) stockoutDay = day;
+  }
+
+  let openPo = 0;
+  let expectedInbound = 0;
+  for (const element of snapshot.supply) {
+    if (element.itemId !== itemId || element.plantId !== plantId) continue;
+    openPo += element.qty;
+    const lines = element.schedule;
+    if (lines && lines.length > 0) {
+      for (const line of lines) {
+        if (line.status === 'CONFIRMED' || line.status === 'IN_TRANSIT' || line.status === 'RECEIVED') {
+          expectedInbound += line.qty;
+        }
+      }
+    } else {
+      expectedInbound += element.qty;
+    }
+  }
+
+  return {
+    demand,
+    openPo,
+    expectedInbound,
+    plannedReceipts,
+    projectedBalance: itemPlan.projectedAvailableFeasible[horizon] as number,
+    lowestBalance: lowest === Number.POSITIVE_INFINITY ? 0 : lowest,
+    stockoutDate: stockoutDay >= 0 ? fromEpochDay(planningEpochDay + stockoutDay) : null,
+    shortfall: (lowest === Number.POSITIVE_INFINITY ? 0 : lowest) - itemPlan.safetyStock,
+  };
+}
+
+/** Open orders for one item-plant, with their delivery buckets. */
+function purchaseOrders(snapshot: PlanningSnapshot, itemId: string, plantId: string): PurchaseOrderView[] {
+  const vendorNames = new Map(snapshot.vendors.map((vendor) => [vendor.id, vendor.name]));
+
+  return snapshot.supply
+    .filter((element) => element.itemId === itemId && element.plantId === plantId)
+    .map((element) => {
+      const lines: DeliveryLineView[] = (element.schedule ?? []).map((line) => ({
+        line: line.line,
+        qty: line.qty,
+        plannedDate: line.plannedDate,
+        confirmedDate: line.confirmedDate,
+        expectedDate: line.expectedDate,
+        status: line.status,
+        slipDays: line.confirmedDate ? Math.max(0, daysBetween(line.plannedDate, line.confirmedDate)) : 0,
+      }));
+
+      let confirmedQty = 0;
+      let unconfirmedQty = 0;
+      let worstSlipDays = 0;
+      for (const line of lines) {
+        if (line.status === 'PLANNED') unconfirmedQty += line.qty;
+        else confirmedQty += line.qty;
+        if (line.slipDays > worstSlipDays) worstSlipDays = line.slipDays;
+      }
+
+      return {
+        id: element.id,
+        type: element.type,
+        vendorId: element.vendorId,
+        vendorName: element.vendorId ? (vendorNames.get(element.vendorId) ?? null) : null,
+        totalQty: element.qty,
+        dueDate: element.dueDate,
+        isFirm: element.isFirm,
+        sourceSystem: element.sourceSystem,
+        lines,
+        confirmedQty,
+        unconfirmedQty,
+        worstSlipDays,
+      } satisfies PurchaseOrderView;
+    })
+    .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : a.id.localeCompare(b.id)));
+}
+
+/**
+ * "Why this quantity?", answered from the run rather than recomputed.
+ *
+ * The engine's own working gives the outer subtraction — order-up-to level less
+ * the balance it found. The inner one, effective stock, is assembled here from
+ * the same facts the netting walk used: stock on hand, the inbound a supplier
+ * has actually committed to, and the demand already booked against it before
+ * the requirement bucket.
+ */
+function explainRecommendation(
+  plan: MrpResult,
+  snapshot: PlanningSnapshot,
+  master: ItemPlant,
+  itemId: string,
+  plantId: string,
+): MrpExplain | null {
+  const key = planKey(itemId, plantId);
+  const explanations = plan.orderExplanations.get(key);
+  const first = explanations?.[0];
+  if (!first) return null;
+
+  const itemPlan = plan.plans.get(key);
+  if (!itemPlan) return null;
+
+  const stock = snapshot.stock.find((entry) => entry.itemId === itemId && entry.plantId === plantId);
+  const onHand = stock?.unrestricted ?? itemPlan.openingStock;
+
+  // Everything the position absorbs before the bucket that breached.
+  let commitments = 0;
+  for (let day = 0; day <= first.requirementDay && day < itemPlan.grossRequirements.length; day += 1) {
+    commitments += itemPlan.grossRequirements[day] as number;
+  }
+
+  // Inbound is derived from the engine's own balance rather than re-summed.
+  //
+  // Netting counts scheduled *and* already-planned receipts up to the bucket
+  // that breached, and its planned-receipt array has this very order written
+  // into it by the time the run finishes — re-adding the series here would
+  // double-count it. The engine's balance is authoritative, so the term that
+  // makes the subtraction close is taken from it, and only the two figures that
+  // cannot drift (stock on hand, demand booked before the bucket) are measured
+  // directly. That way the panel can never disagree with the plan it explains.
+  const inbound = first.balanceBefore - onHand + commitments;
+
+  // What none of that inbound has behind it: a supplier commitment.
+  let unconfirmedInbound = 0;
+  const requirementDate = fromEpochDay(toEpochDay(plan.planningDate) + first.requirementDay);
+  for (const element of snapshot.supply) {
+    if (element.itemId !== itemId || element.plantId !== plantId) continue;
+    for (const line of element.schedule ?? []) {
+      if (line.status !== 'PLANNED') continue;
+      if (line.expectedDate > requirementDate) continue;
+      unconfirmedInbound += line.qty;
+    }
+  }
+
+  const horizon = itemPlan.grossRequirements.length - 1;
+  let totalDemand = 0;
+  for (let day = 0; day <= horizon; day += 1) totalDemand += itemPlan.grossRequirements[day] as number;
+  const averageDailyDemand = horizon > 0 ? totalDemand / horizon : 0;
+
+  const observed = observedLeadTimeFor(snapshot, itemId, plantId);
+  const vendor = snapshot.itemVendors.find(
+    (link) => link.itemId === itemId && link.plantId === plantId && link.isPrimary,
+  );
+
+  return {
+    recommendedQty: first.qty,
+    ruleQty: first.ruleQty,
+    orderUpToLevel: first.threshold,
+    netRequirement: first.netRequirement,
+    effectiveStock: {
+      onHand,
+      inbound,
+      commitments,
+      total: first.balanceBefore,
+      unconfirmedInbound,
+    },
+    assumptions: {
+      averageDailyDemand,
+      safetyStock: master.safetyStock ?? 0,
+      inventoryNorm: first.threshold,
+      leadTimeDays: first.effectiveLeadTimeDays,
+      observedLeadTimeDays: observed,
+      lotSizeRule: master.lotSizeRule,
+      moq: vendor?.moq ?? null,
+    },
+    receiptDate: first.receiptDate,
+    releaseDate: first.releaseDate,
+    isReleaseInPast: first.isReleaseInPast,
+    totalOffsetDays: first.totalOffsetDays,
+  };
+}
+
+/** Mean actual lead time from goods-receipt history, or null where there is none. */
+function observedLeadTimeFor(snapshot: PlanningSnapshot, itemId: string, plantId: string): number | null {
+  let total = 0;
+  let count = 0;
+  for (const receipt of snapshot.receiptHistory) {
+    if (receipt.itemId !== itemId || receipt.plantId !== plantId) continue;
+    total += receipt.actualLeadTimeDays;
+    count += 1;
+  }
+  return count > 0 ? total / count : null;
 }
 
 function splitDemandByType(
@@ -807,6 +1247,63 @@ export function blastRadius(scenarioId: string, exceptionId: string): BlastRadiu
 // Simulation
 // ---------------------------------------------------------------------------
 
+/**
+ * A planner override, weighed before it is applied.
+ *
+ * The same machinery a resolution uses: clone the snapshot, set the parameter,
+ * re-run, diff. Nothing is committed — this is the "what would happen" the
+ * planner is entitled to before they touch anything, and answering it with an
+ * estimate rather than a real run is how a decision-support tool loses the
+ * planner's trust the first time the two disagree.
+ */
+export function previewOverride(
+  scenarioId: string,
+  itemId: string,
+  plantId: string,
+  field: Extract<SnapshotMutation, { kind: 'SET_ITEM_PLANT_PARAM' }>['field'],
+  value: number | null,
+): OverridePreview | null {
+  const plan = planFor(scenarioId);
+  const snapshot = snapshotFor(scenarioId);
+  const master = snapshot.itemPlants.find((entry) => entry.itemId === itemId && entry.plantId === plantId);
+  if (!master) return null;
+
+  const options = planningOptions(scenarioId);
+  const result = simulate(snapshot, plan, [{ kind: 'SET_ITEM_PLANT_PARAM', itemId, plantId, field, value }], options);
+
+  const key = planKey(itemId, plantId);
+  const beforePlan = plan.plans.get(key);
+  const afterPlan = result.plan.plans.get(key);
+  const afterMaster = result.snapshot.itemPlants.find((entry) => entry.itemId === itemId && entry.plantId === plantId);
+
+  const lowest = (series: Float64Array | undefined): number => {
+    if (!series) return 0;
+    let low = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < series.length; index += 1) {
+      const point = series[index] as number;
+      if (point < low) low = point;
+    }
+    return low === Number.POSITIVE_INFINITY ? 0 : low;
+  };
+
+  return {
+    field,
+    label: fieldLabel(field),
+    systemValue: (master[field] as number | null) ?? null,
+    overrideValue: value,
+    before: explainRecommendation(plan, snapshot, master, itemId, plantId),
+    after: afterMaster ? explainRecommendation(result.plan, result.snapshot, afterMaster, itemId, plantId) : null,
+    beforeBalance: beforePlan ? downsample(beforePlan.projectedAvailableFeasible, 60) : [],
+    afterBalance: afterPlan ? downsample(afterPlan.projectedAvailableFeasible, 60) : [],
+    dates: sampleDates(toEpochDay(plan.planningDate), plan.horizonDays, 60),
+    exceptionCountDelta: result.diff.kpiDelta.exceptionCount,
+    exposureDelta: result.diff.kpiDelta.totalExposure,
+    beforeLowestBalance: lowest(beforePlan?.projectedAvailableFeasible),
+    afterLowestBalance: lowest(afterPlan?.projectedAvailableFeasible),
+    elapsedMs: result.plan.elapsedMs,
+  };
+}
+
 export function simulateResolution(
   scenarioId: string,
   exceptionId: string,
@@ -870,6 +1367,12 @@ function sampleDates(planningEpochDay: number, horizonDays: number, buckets: num
   const out: string[] = [];
   for (let day = 0; day <= horizonDays; day += step) out.push(fromEpochDay(planningEpochDay + day));
   return out;
+}
+
+/** A camelCase master-data field as a planner would say it: `leadTimeDays` → `Lead time days`. */
+function fieldLabel(field: string): string {
+  const spaced = field.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
 function humanise(label: string): string {

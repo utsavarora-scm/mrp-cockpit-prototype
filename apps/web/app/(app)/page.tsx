@@ -14,6 +14,7 @@ import type { CockpitSummary, ExceptionQueryResult } from '@/lib/api-types';
 import { EMPTY_FACETS, Facets, type FacetState } from '@/components/cockpit/Facets';
 import { ExceptionQueue } from '@/components/cockpit/ExceptionQueue';
 import { KpiStrip } from '@/components/cockpit/KpiStrip';
+import { PlanningPositionStrip } from '@/components/cockpit/PlanningPositionStrip';
 import { ParetoChart } from '@/components/cockpit/ParetoChart';
 
 export default function CockpitPage() {
@@ -61,6 +62,7 @@ export default function CockpitPage() {
   return (
     <div className='flex h-[calc(100svh-3rem)] flex-col'>
       <KpiStrip summary={summary.data} />
+      <PlanningPositionStrip summary={summary.data} />
       <ParetoChart summary={summary.data} />
       <div className='flex min-h-0 flex-1'>
         <Facets facets={exceptions.data?.facets} state={facetState} onChange={setFacetState} />
