@@ -21,7 +21,10 @@
       "cache": false,
       "persistent": true
     },
-    "test:unit": {},
+    "test:unit": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
     "find-deadcode": {
       "dependsOn": ["^find-deadcode:web"]
     },

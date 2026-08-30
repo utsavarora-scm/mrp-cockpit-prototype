@@ -5,13 +5,16 @@
  * model alone — no pack-specific vocabulary reaches any of them. Adding a second
  * pack is a matter of writing another generator and registering it here.
  *
- * Selected by `NEXT_PUBLIC_DATA_PACK`, defaulting to the confectionery pack.
+ * `NEXT_PUBLIC_DATA_PACK` picks the pack the app *boots* with. It does not
+ * constrain what the app can reach: the category switcher calls `getDataPack`
+ * at runtime, which is what lets Act 1 and Act 2 be one unbroken take rather
+ * than two recordings joined in an edit.
  */
 
 import type { MrpOptions, PlanningSnapshot } from '@repo/domain';
 
-import { CONFECTIONERY_COUNTS, generateConfectionerySnapshot } from './confectionery/generate';
-import { CONFECTIONERY_SPEC } from './confectionery/spec';
+import { GCPL_SOAPS_COUNTS, generateGcplSoapsSnapshot } from './gcpl-soaps/generate';
+import { GCPL_SOAPS_SPEC } from './gcpl-soaps/spec';
 
 export interface DataPack {
   id: string;
@@ -24,16 +27,16 @@ export interface DataPack {
   defaultOptions(scenarioId: string): MrpOptions;
 }
 
-const confectionery: DataPack = {
-  id: CONFECTIONERY_SPEC.id,
-  label: CONFECTIONERY_SPEC.label,
-  planningDate: CONFECTIONERY_SPEC.planningDate,
-  horizonDays: CONFECTIONERY_SPEC.horizonDays,
-  seed: CONFECTIONERY_SPEC.seed,
-  generate: generateConfectionerySnapshot,
+const soaps: DataPack = {
+  id: GCPL_SOAPS_SPEC.id,
+  label: GCPL_SOAPS_SPEC.label,
+  planningDate: GCPL_SOAPS_SPEC.planningDate,
+  horizonDays: GCPL_SOAPS_SPEC.horizonDays,
+  seed: GCPL_SOAPS_SPEC.seed,
+  generate: generateGcplSoapsSnapshot,
   defaultOptions: (scenarioId: string): MrpOptions => ({
-    planningDate: CONFECTIONERY_SPEC.planningDate,
-    horizonDays: CONFECTIONERY_SPEC.horizonDays,
+    planningDate: GCPL_SOAPS_SPEC.planningDate,
+    horizonDays: GCPL_SOAPS_SPEC.horizonDays,
     bucketing: 'DAY',
     forecastConsumption: { backwardDays: 20, forwardDays: 10 },
     useActualLeadTimes: false,
@@ -42,19 +45,20 @@ const confectionery: DataPack = {
 };
 
 const REGISTRY: Record<string, DataPack> = {
-  [confectionery.id]: confectionery,
+  [soaps.id]: soaps,
 };
 
-export const DEFAULT_DATA_PACK_ID = confectionery.id;
+export const DEFAULT_DATA_PACK_ID = soaps.id;
 
 export function getDataPack(id: string | undefined = DEFAULT_DATA_PACK_ID): DataPack {
-  return REGISTRY[id ?? DEFAULT_DATA_PACK_ID] ?? confectionery;
+  return REGISTRY[id ?? DEFAULT_DATA_PACK_ID] ?? soaps;
 }
 
 export function listDataPacks(): DataPack[] {
   return Object.values(REGISTRY);
 }
 
-export { CONFECTIONERY_COUNTS, CONFECTIONERY_SPEC };
+export { GCPL_SOAPS_COUNTS, GCPL_SOAPS_SPEC };
+export { HERO, PACKAGING_DRIFT, DUAL_SOURCED } from './gcpl-soaps/spec';
 export { mulberry32, streamFactory, type Rng } from './prng';
 export { attachDeliverySchedules, buildDeliverySchedule } from './delivery-schedule';

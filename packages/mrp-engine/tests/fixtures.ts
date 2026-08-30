@@ -88,6 +88,11 @@ export function itemPlant(overrides: Partial<ItemPlant> & Pick<ItemPlant, 'itemI
     sourcePlantId: null,
     isPlanningRelevant: true,
     paramsLastChangedOn: '2024-01-01',
+    storageCapacity: null,
+    dailyReceivingCapacity: null,
+    maintainedStockDays: null,
+    maintainedOrderDays: null,
+    campaignCycleDays: null,
     ...overrides,
   };
 }
