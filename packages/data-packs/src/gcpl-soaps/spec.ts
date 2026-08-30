@@ -463,9 +463,16 @@ export const GCPL_SOAPS_SPEC = {
    */
   volumes: {
     /** Daily finished-goods offtake per SKU-plant, units. */
-    fgDailyRange: [300, 1_800] as const,
-    fgStockDaysRange: [5, 11] as const,
-    sfgStockDaysRange: [2, 5] as const,
+    fgDailyRange: [240, 1_440] as const,
+    /**
+     * Finished-goods cover by ABC class. Fast movers turn quickly and are held
+     * for days; slow movers accumulate weeks of cover. Every band sits above
+     * the 2–6 day make lead time, because a made item held below its own lead
+     * time is already late on day zero, and that shortfall then cascades down
+     * the bill of material and buries the one material Act 1 is about.
+     */
+    fgStockDaysByClass: { A: [5, 8], B: [9, 14], C: [14, 22] } as const,
+    sfgStockDaysRange: [7, 13] as const,
     /** Bought-in materials are held against the maintained norm — the story. */
     boughtStockDaysMultiplier: [0.7, 1.25] as const,
   },

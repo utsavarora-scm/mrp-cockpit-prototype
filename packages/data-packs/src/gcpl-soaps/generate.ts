@@ -148,6 +148,11 @@ function buildItems(rng: Rng): Item[] {
     hero.description = 'Palm Fatty Acid Distillate, Imported';
   }
 
+  // The finished good at the head of the hero chain carries the category's
+  // volume, so it is A-class by definition and turns like one.
+  const heroFg = items.find((item) => item.id === HERO_FG);
+  if (heroFg) heroFg.abcClass = 'A';
+
   return items;
 }
 
@@ -754,6 +759,7 @@ function buildStock(
   consumption: Map<string, Consumption>
 ): StockPosition[] {
   const typeOf = new Map(items.map((item) => [item.id, item.type]));
+  const classOf = new Map(items.map((item) => [item.id, item.abcClass]));
   const stock: StockPosition[] = [];
 
   for (const row of itemPlants) {
@@ -766,9 +772,10 @@ function buildStock(
     // both directions. Made items turn far faster and are not what the norms
     // argument is about, so they are held to a realistic few days instead.
     const type = typeOf.get(row.itemId);
+    const fgBand = SPEC.volumes.fgStockDaysByClass[classOf.get(row.itemId) ?? 'B'] as readonly [number, number];
     const targetDays =
       type === 'FG'
-        ? rng.float(...SPEC.volumes.fgStockDaysRange)
+        ? rng.float(fgBand[0], fgBand[1])
         : type === 'SFG'
           ? rng.float(...SPEC.volumes.sfgStockDaysRange)
           : (row.maintainedStockDays ?? 30) * rng.float(...SPEC.volumes.boughtStockDaysMultiplier);
@@ -816,15 +823,34 @@ function buildSupply(
     const key = `${row.itemId}@${row.plantId}`;
     const used = consumption.get(key);
     if (!used || used.mean <= 0) continue;
-    if (!rng.chance(0.55)) continue;
 
-    const orders = rng.int(1, 3);
+    const isBought = typeOf.get(row.itemId) === 'RM' || typeOf.get(row.itemId) === 'PM';
+    const leadTime = row.leadTimeDays ?? 14;
+
+    // A material on a 45-day lead time always has roughly 45 days of
+    // consumption already on order — that is what a replenishment pipeline
+    // *is*. Seeding a thin pipeline instead makes almost every bought material
+    // read as already-late on day zero, which buries the one material whose
+    // lateness the demo is actually about.
+    const pipelineDays = isBought ? leadTime * rng.float(0.85, 1.3) : rng.float(3, 8);
+    const isHero = row.itemId === HERO.itemId && row.plantId === HERO.plantId;
+
+    // The hero is deliberately under-covered. Act 1 opens on the consequence of
+    // a norm that was sized as though lead time never moved.
+    const totalQty = isHero ? used.mean * 18 : used.mean * pipelineDays;
+    if (totalQty <= 0) continue;
+    if (!isBought && !rng.chance(0.45)) continue;
+
+    const orders = isBought ? rng.int(2, 4) : 1;
+    const perOrder = totalQty / orders;
+
     for (let index = 0; index < orders; index += 1) {
-      const dueInDays = rng.int(2, 70);
-      const qty = Math.round(used.mean * rng.float(8, 28));
+      // Spread across the lead-time window, so receipts land steadily rather
+      // than all at once.
+      const dueInDays = Math.max(2, Math.round(((index + 1) / orders) * Math.max(leadTime, 6) * rng.float(0.7, 1.15)));
+      const qty = Math.round(perOrder);
       if (qty <= 0) continue;
       const vendor = vendorFor.get(key);
-      const isBought = typeOf.get(row.itemId) === 'RM' || typeOf.get(row.itemId) === 'PM';
 
       supply.push({
         id: `PO-${row.itemId}-${row.plantId}-${index}`,
@@ -833,7 +859,7 @@ function buildSupply(
         plantId: row.plantId,
         qty,
         dueDate: fromEpochDay(PLANNING_EPOCH + dueInDays),
-        releaseDate: fromEpochDay(PLANNING_EPOCH + dueInDays - (row.leadTimeDays ?? 14)),
+        releaseDate: fromEpochDay(PLANNING_EPOCH + dueInDays - leadTime),
         vendorId: isBought ? (vendor?.vendorId ?? null) : null,
         sourcePlantId: null,
         isFirm: true,
