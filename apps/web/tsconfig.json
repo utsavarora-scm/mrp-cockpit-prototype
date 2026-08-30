@@ -9,8 +9,6 @@
       "@repo/domain/*": ["../../packages/domain/src/*"],
       "@repo/mrp-engine": ["../../packages/mrp-engine/src/index.ts"],
       "@repo/mrp-engine/*": ["../../packages/mrp-engine/src/*"],
-      "@repo/adapters": ["../../packages/adapters/src/index.ts"],
-      "@repo/adapters/*": ["../../packages/adapters/src/*"],
       "@repo/data-packs": ["../../packages/data-packs/src/index.ts"],
       "@repo/data-packs/*": ["../../packages/data-packs/src/*"]
     },

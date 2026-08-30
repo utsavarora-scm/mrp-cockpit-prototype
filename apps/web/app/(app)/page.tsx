@@ -1,25 +1,21 @@
 'use client';
 
 /**
- * S1 — the planner cockpit.
+ * Planning Cockpit — placeholder.
  *
- * The landing screen and the first beat of the demo: how many exceptions, how
- * much money, and how little of the queue carries most of it.
+ * The v1 exception queue that stood here has been removed. The real cockpit —
+ * the excess ↔ exposure hero, gap attribution and the needs-attention table —
+ * is built in Checkpoint C2, on top of the norms engine that computes those two
+ * figures. Until then this screen states what it will hold rather than
+ * pretending to hold it.
  */
 
 import { useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import Link from 'next/link';
 
-import type { CockpitSummary, ExceptionQueryResult } from '@/lib/api-types';
-import { EMPTY_FACETS, Facets, type FacetState } from '@/components/cockpit/Facets';
-import { ExceptionQueue } from '@/components/cockpit/ExceptionQueue';
-import { KpiStrip } from '@/components/cockpit/KpiStrip';
-import { PlanningPositionStrip } from '@/components/cockpit/PlanningPositionStrip';
-import { ParetoChart } from '@/components/cockpit/ParetoChart';
+import type { CockpitSummary } from '@/lib/api-types';
 
 export default function CockpitPage() {
-  const [facetState, setFacetState] = useState<FacetState>(EMPTY_FACETS);
-
   const summary = useQuery({
     queryKey: ['plan-summary', 'baseline'],
     queryFn: async (): Promise<CockpitSummary> => {
@@ -29,47 +25,34 @@ export default function CockpitPage() {
     },
   });
 
-  const queryString = useMemo(() => {
-    const params = new URLSearchParams({ scenario: 'baseline', limit: '400' });
-    for (const key of ['plant', 'exceptionClass', 'itemType', 'abcClass', 'plannerCode', 'timeToImpact'] as const) {
-      const values = facetState[key];
-      if (values.length > 0) params.set(key, values.join(','));
-    }
-    if (facetState.autoResolvableOnly) params.set('autoResolvableOnly', 'true');
-    if (facetState.search) params.set('search', facetState.search);
-    return params.toString();
-  }, [facetState]);
-
-  const exceptions = useQuery({
-    queryKey: ['exceptions', queryString],
-    queryFn: async (): Promise<ExceptionQueryResult> => {
-      const response = await fetch(`/api/exceptions?${queryString}`);
-      if (!response.ok) throw new Error('The exception queue could not be loaded.');
-      return response.json();
-    },
-    placeholderData: (previous) => previous,
-  });
-
-  if (summary.isError) {
-    return (
-      <div className='flex h-96 flex-col items-center justify-center gap-2 text-[13px]'>
-        <span className='font-medium'>The plan could not be loaded.</span>
-        <span className='text-muted-foreground'>Use Run MRP in the top bar to try again.</span>
-      </div>
-    );
-  }
+  const position = summary.data?.planningPosition;
 
   return (
-    <div className='flex h-[calc(100svh-3rem)] flex-col'>
-      <KpiStrip summary={summary.data} />
-      <PlanningPositionStrip summary={summary.data} />
-      <ParetoChart summary={summary.data} />
-      <div className='flex min-h-0 flex-1'>
-        <Facets facets={exceptions.data?.facets} state={facetState} onChange={setFacetState} />
-        <div className='flex min-w-0 flex-1 flex-col'>
-          <ExceptionQueue data={exceptions.data} isLoading={exceptions.isLoading} />
-        </div>
-      </div>
+    <div className='mx-auto max-w-[1600px] px-8 py-10'>
+      <h1 className='text-[15px] font-semibold tracking-[0.04em] uppercase'>Planning Cockpit</h1>
+      <p className='text-muted-foreground mt-2 max-w-[62ch] text-[14px]'>
+        The cockpit is rebuilt in Checkpoint C2, once the norms engine can compute the two figures it leads with: excess
+        capital and unprotected exposure.
+      </p>
+
+      <dl className='mt-8 grid max-w-[720px] grid-cols-3 gap-6'>
+        {[
+          { label: 'Materials planned', value: position?.mrpMaterials },
+          { label: 'At risk', value: position?.atRisk },
+          { label: 'Open orders', value: position?.openPos },
+        ].map((tile) => (
+          <div key={tile.label}>
+            <dt className='text-muted-foreground text-[12px] font-medium'>{tile.label}</dt>
+            <dd className='mt-1 text-[32px] font-semibold tabular-nums'>
+              {tile.value === undefined ? '—' : tile.value.toLocaleString('en-IN')}
+            </dd>
+          </div>
+        ))}
+      </dl>
+
+      <Link href='/item' className='text-primary mt-8 inline-block text-[14px] font-medium hover:underline'>
+        Open materials →
+      </Link>
     </div>
   );
 }

@@ -6,9 +6,7 @@
  * view of the data a given screen needs.
  */
 
-import { proposeWritebacks } from '@repo/adapters';
 import {
-  IMPACT_CONFIG,
   daysBetween,
   formatDays,
   formatQty,
@@ -18,44 +16,26 @@ import {
   type DemandElement,
   type ItemPlant,
   type MrpResult,
-  type PlanningException,
   type PlanningSnapshot,
-  type Resolution,
   type SnapshotMutation,
 } from '@repo/domain';
-import { compositeScore, reviewPeriodDays, demandStdDev, simulate } from '@repo/mrp-engine';
+import { reviewPeriodDays, demandStdDev } from '@repo/mrp-engine';
 
 import type {
-  AffectedOrder,
-  BlastRadius,
-  BlastRadiusEdge,
-  BlastRadiusNode,
   CockpitSummary,
   DeliveryLineView,
-  ExceptionDetail,
-  ExceptionQueryResult,
-  ExceptionRow,
-  FacetOption,
   ItemDetail,
   ItemPosition,
-  KpiDelta,
   MaterialRow,
   MaterialsQueryResult,
   MrpExplain,
   OverridePreview,
   ParameterHealth,
-  ParetoPoint,
   PlanningPosition,
   PurchaseOrderView,
-  ResolutionCard,
-  SimulationDiff,
   TimePhasedRow,
-  TraceLine,
 } from '../api-types';
-import { dataPack, planFor, planningOptions, previousKpis, snapshotFor } from './planning-session';
-
-const PARETO_POINTS = 60;
-const SPARKLINE_BUCKETS = 32;
+import { dataPack, planFor, planWithParamOverride, snapshotFor } from './planning-session';
 
 /** Opening stock above this many times the horizon's own demand reads as excess. */
 const EXCESS_COVER_MULTIPLE = 1.35;
@@ -66,73 +46,50 @@ const WATCH_THRESHOLD = 1;
 /** Days of demand a material's stock should cover to count as comfortably held. */
 const INVENTORY_COVER_TARGET_DAYS = 30;
 
-// ---------------------------------------------------------------------------
-// Cockpit
-// ---------------------------------------------------------------------------
+/** Planning parameters older than this are no longer considered fresh. */
+const PARAM_FRESHNESS_DAYS = 365;
 
+/** |observed − maintained| / maintained above this reads as lead-time drift. */
+const LEAD_TIME_DRIFT_PCT = 0.2;
+
+/** |calculated − maintained| / maintained above this reads as a stale buffer. */
+const SAFETY_STOCK_MISALIGN_PCT = 0.3;
+
+/** How a parameter set's health score is weighted across its three parts. */
+const HEALTH_WEIGHTS = { completeness: 0.4, freshness: 0.3, consistency: 0.3 } as const;
+
+/**
+ * What the top bar and the reset endpoint read: how the plan stands, and how
+ * long the run took. The v2 cockpit hero — excess capital against unprotected
+ * exposure — is computed by the norms engine and lands with Checkpoint B.
+ */
 export function cockpitSummary(scenarioId: string): CockpitSummary {
   const plan = planFor(scenarioId);
-  const previous = previousKpis();
   const pack = dataPack();
-
-  const delta = (value: number, before: number | undefined): KpiDelta => ({
-    value,
-    delta: before === undefined ? null : value - before,
-  });
-
-  let cumulative = 0;
-  const pareto: ParetoPoint[] = [];
-  for (let index = 0; index < Math.min(PARETO_POINTS, plan.exceptions.length); index += 1) {
-    const exception = plan.exceptions[index] as PlanningException;
-    cumulative += exception.impactValue;
-    pareto.push({
-      rank: index + 1,
-      impactValue: exception.impactValue,
-      cumulativeShare: plan.kpis.totalExposure > 0 ? cumulative / plan.kpis.totalExposure : 0,
-      code: exception.code,
-      itemId: exception.itemId,
-      plantId: exception.plantId,
-    });
-  }
-
   return {
     scenarioId,
     planningDate: pack.planningDate,
     horizonDays: pack.horizonDays,
     elapsedMs: plan.elapsedMs,
-    exceptionCount: plan.kpis.exceptionCount,
-    totalExposure: delta(plan.kpis.totalExposure, previous?.totalExposure),
-    projectedFillRate: delta(plan.kpis.projectedFillRate, previous?.projectedFillRate),
-    inventoryValue: delta(plan.kpis.inventoryValue, previous?.inventoryValue),
-    daysOnHand: delta(plan.kpis.daysOnHand, previous?.daysOnHand),
-    excessObsoleteExposure: delta(plan.kpis.excessObsoleteExposure, previous?.excessObsoleteExposure),
-    expediteSpendMtd: delta(plan.kpis.expediteSpendMtd, previous?.expediteSpendMtd),
-    autoResolvedPct: delta(plan.kpis.autoResolvedPct, previous?.autoResolvedPct),
-    exceptionsToSeventyPercent: plan.kpis.exceptionsToSeventyPercent,
-    seventyPercentHeadShare: plan.kpis.seventyPercentHeadShare,
-    exceptionsByClass: plan.kpis.exceptionsByClass,
-    exposureByClass: plan.kpis.exposureByClass,
-    pareto,
-    sparklines: buildKpiSparklines(plan),
     planningPosition: planningPosition(scenarioId),
   };
 }
 
-/**
- * The plan's standing position, counted rather than valued.
- *
- * Walked once over the item-plants and once over open supply, both of which the
- * cockpit is already paying to hold in memory, so this costs a pass and no
- * extra planning.
- */
 export function planningPosition(scenarioId: string): PlanningPosition {
   const plan = planFor(scenarioId);
-  const snapshot = snapshotFor(scenarioId);
+  const snapshot = snapshotFor();
 
+  // At risk = the orderable-supply balance goes negative somewhere in the
+  // horizon. Read off the plan directly rather than counted from a separate
+  // exception pass, so the number cannot drift from the curve it describes.
   const atRiskKeys = new Set<string>();
-  for (const exception of plan.exceptions) {
-    if (exception.itemId === '—') continue;
-    atRiskKeys.add(planKey(exception.itemId, exception.plantId));
+  for (const [key, itemPlan] of plan.plans) {
+    for (let day = 0; day <= plan.horizonDays; day += 1) {
+      if ((itemPlan.projectedAvailableFeasible[day] as number) < 0) {
+        atRiskKeys.add(key);
+        break;
+      }
+    }
   }
 
   let projectedStockouts = 0;
@@ -190,7 +147,7 @@ export function planningPosition(scenarioId: string): PlanningPosition {
     delayedInbound,
     coverage: {
       inventory: share(coveredByInventory),
-      demand: plan.kpis.projectedFillRate,
+      demand: share(planned - atRiskKeys.size),
       supply: share(planned - projectedStockouts),
       safetyStock: share(aboveSafety),
     },
@@ -205,246 +162,6 @@ export function planningPosition(scenarioId: string): PlanningPosition {
  * is no history to invent from and a fabricated trend line is exactly the kind
  * of detail this audience checks.
  */
-function buildKpiSparklines(plan: MrpResult): Record<string, number[]> {
-  const buckets = 24;
-  const exposureByBucket = new Array<number>(buckets).fill(0);
-  const horizon = plan.horizonDays;
-
-  for (const exception of plan.exceptions) {
-    if (exception.bucketDay < 0) continue;
-    const bucket = Math.min(buckets - 1, Math.floor((exception.bucketDay / horizon) * buckets));
-    exposureByBucket[bucket] = (exposureByBucket[bucket] as number) + exception.impactValue;
-  }
-
-  const coverByBucket = new Array<number>(buckets).fill(0);
-  let counted = 0;
-  for (const itemPlan of plan.plans.values()) {
-    counted += 1;
-    for (let bucket = 0; bucket < buckets; bucket += 1) {
-      const day = Math.floor((bucket / buckets) * horizon);
-      coverByBucket[bucket] = (coverByBucket[bucket] as number) + (itemPlan.daysOfCover[day] as number);
-    }
-  }
-  if (counted > 0)
-    for (let bucket = 0; bucket < buckets; bucket += 1)
-      coverByBucket[bucket] = (coverByBucket[bucket] as number) / counted;
-
-  return { exposure: exposureByBucket, cover: coverByBucket };
-}
-
-// ---------------------------------------------------------------------------
-// Exception queue
-// ---------------------------------------------------------------------------
-
-export interface ExceptionFilters {
-  plant?: string[];
-  exceptionClass?: string[];
-  itemType?: string[];
-  abcClass?: string[];
-  plannerCode?: string[];
-  timeToImpact?: string[];
-  autoResolvableOnly?: boolean;
-  search?: string;
-  limit?: number;
-  offset?: number;
-}
-
-export function queryExceptions(scenarioId: string, filters: ExceptionFilters): ExceptionQueryResult {
-  const plan = planFor(scenarioId);
-  const snapshot = snapshotFor(scenarioId);
-  const context = buildRowContext(plan, snapshot);
-
-  const all = plan.exceptions.map((exception) => toRow(exception, plan, context));
-  const matched = all.filter((row) => matches(row, filters));
-
-  const limit = filters.limit ?? 200;
-  const offset = filters.offset ?? 0;
-
-  return {
-    rows: matched.slice(offset, offset + limit),
-    total: matched.length,
-    filteredExposure: matched.reduce((sum, row) => sum + row.impactValue, 0),
-    // Facets count against everything except their own dimension, so selecting
-    // one plant does not make every other plant read zero.
-    facets: {
-      plant: facet(all, filters, 'plant', (row) => row.plantId),
-      exceptionClass: facet(all, filters, 'exceptionClass', (row) => row.exceptionClass, classLabel),
-      itemType: facet(all, filters, 'itemType', (row) => row.itemType),
-      abcClass: facet(all, filters, 'abcClass', (row) => row.abcClass),
-      plannerCode: facet(all, filters, 'plannerCode', (row) => row.plannerCode ?? '—'),
-      timeToImpact: facet(all, filters, 'timeToImpact', timeBucketOf, timeBucketLabel),
-    },
-  };
-}
-
-interface RowContext {
-  itemById: Map<string, PlanningSnapshot['items'][number]>;
-  itemPlantByKey: Map<string, ItemPlant>;
-  resolutions: Map<string, Resolution>;
-  planningEpochDay: number;
-}
-
-function buildRowContext(plan: MrpResult, snapshot: PlanningSnapshot): RowContext {
-  return {
-    itemById: new Map(snapshot.items.map((item) => [item.id, item])),
-    itemPlantByKey: new Map(snapshot.itemPlants.map((record) => [planKey(record.itemId, record.plantId), record])),
-    resolutions: plan.resolutions,
-    planningEpochDay: toEpochDay(plan.planningDate),
-  };
-}
-
-function toRow(exception: PlanningException, plan: MrpResult, context: RowContext): ExceptionRow {
-  const item = context.itemById.get(exception.itemId);
-  const master = context.itemPlantByKey.get(planKey(exception.itemId, exception.plantId));
-  const itemPlan = plan.plans.get(planKey(exception.itemId, exception.plantId));
-
-  const best = exception.resolutionIds
-    .map((id) => context.resolutions.get(id))
-    .filter((resolution): resolution is Resolution => Boolean(resolution))
-    .sort((a, b) => compositeScore(b) - compositeScore(a))[0];
-
-  return {
-    id: exception.id,
-    code: exception.code,
-    exceptionClass: exception.exceptionClass,
-    severity: exception.severity,
-    impactValue: exception.impactValue,
-    itemId: exception.itemId,
-    itemDescription: item?.description ?? '—',
-    itemType: item?.type ?? '—',
-    plantId: exception.plantId,
-    abcClass: item?.abcClass ?? '—',
-    xyzClass: item?.xyzClass ?? '—',
-    plannerCode: master?.plannerCode ?? null,
-    bucketDay: exception.bucketDay,
-    needDate: exception.bucketDay >= 0 ? fromEpochDay(context.planningEpochDay + exception.bucketDay) : null,
-    daysToImpact: exception.bucketDay >= 0 ? exception.bucketDay : null,
-    peggedFgCount: exception.peggedFgCount,
-    narrative: exception.narrative,
-    bestResolutionLabel: best?.label ?? null,
-    bestResolutionConfidence: best?.confidence ?? null,
-    autoResolvable: exception.autoResolvable,
-    sparkline: itemPlan ? downsample(itemPlan.projectedAvailableFeasible, SPARKLINE_BUCKETS) : [],
-  };
-}
-
-function matches(row: ExceptionRow, filters: ExceptionFilters): boolean {
-  if (filters.plant?.length && !filters.plant.includes(row.plantId)) return false;
-  if (filters.exceptionClass?.length && !filters.exceptionClass.includes(row.exceptionClass)) return false;
-  if (filters.itemType?.length && !filters.itemType.includes(row.itemType)) return false;
-  if (filters.abcClass?.length && !filters.abcClass.includes(row.abcClass)) return false;
-  if (filters.plannerCode?.length && !filters.plannerCode.includes(row.plannerCode ?? '—')) return false;
-  if (filters.timeToImpact?.length && !filters.timeToImpact.includes(timeBucketOf(row))) return false;
-  if (filters.autoResolvableOnly && !row.autoResolvable) return false;
-  if (filters.search) {
-    const needle = filters.search.toLowerCase();
-    const haystack = `${row.itemId} ${row.itemDescription} ${row.code} ${row.plantId}`.toLowerCase();
-    if (!haystack.includes(needle)) return false;
-  }
-  return true;
-}
-
-function facet(
-  all: ExceptionRow[],
-  filters: ExceptionFilters,
-  dimension: keyof ExceptionFilters,
-  valueOf: (row: ExceptionRow) => string,
-  labelOf: (value: string) => string = (value) => value,
-): FacetOption[] {
-  const withoutOwn: ExceptionFilters = { ...filters, [dimension]: undefined };
-  const counts = new Map<string, number>();
-  for (const row of all) {
-    if (!matches(row, withoutOwn)) continue;
-    const value = valueOf(row);
-    counts.set(value, (counts.get(value) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .map(([value, count]) => ({ value, label: labelOf(value), count }))
-    .sort((a, b) => (b.count !== a.count ? b.count - a.count : a.value < b.value ? -1 : 1));
-}
-
-function timeBucketOf(row: ExceptionRow): string {
-  if (row.daysToImpact === null) return 'none';
-  if (row.daysToImpact <= 7) return 'week';
-  if (row.daysToImpact <= 30) return 'month';
-  if (row.daysToImpact <= 90) return 'quarter';
-  return 'later';
-}
-
-function timeBucketLabel(value: string): string {
-  const labels: Record<string, string> = {
-    week: 'Within 7 days',
-    month: 'Within 30 days',
-    quarter: 'Within 90 days',
-    later: 'Beyond 90 days',
-    none: 'Not time-phased',
-  };
-  return labels[value] ?? value;
-}
-
-function classLabel(value: string): string {
-  const labels: Record<string, string> = {
-    A: 'A · Supply continuity',
-    B: 'B · Master data',
-    C: 'C · Cross-system',
-    D: 'D · Feasibility',
-  };
-  return labels[value] ?? value;
-}
-
-// ---------------------------------------------------------------------------
-// Exception detail
-// ---------------------------------------------------------------------------
-
-export function exceptionDetail(scenarioId: string, exceptionId: string): ExceptionDetail | null {
-  const plan = planFor(scenarioId);
-  const snapshot = snapshotFor(scenarioId);
-  const exception = plan.exceptions.find((entry) => entry.id === exceptionId);
-  if (!exception) return null;
-
-  const context = buildRowContext(plan, snapshot);
-  const resolutions = exception.resolutionIds
-    .map((id) => plan.resolutions.get(id))
-    .filter((resolution): resolution is Resolution => Boolean(resolution))
-    .map(
-      (resolution): ResolutionCard => ({
-        id: resolution.id,
-        type: resolution.type,
-        label: resolution.label,
-        rationale: resolution.rationale,
-        estimatedCost: resolution.estimatedCost,
-        estimatedServiceImpact: resolution.estimatedServiceImpact,
-        estimatedInventoryImpact: resolution.estimatedInventoryImpact,
-        leadTimeToEffect: resolution.leadTimeToEffect,
-        confidence: resolution.confidence,
-        writebackTargets: resolution.writebackTargets,
-        score: compositeScore(resolution),
-      }),
-    )
-    .sort((a, b) => b.score - a.score);
-
-  return {
-    row: toRow(exception, plan, context),
-    impact: exception.impact,
-    trace: exception.evidence.map(
-      (fact): TraceLine => ({
-        label: fact.label,
-        value: fact.value,
-        detail: fact.detail,
-        kind: fact.kind,
-        link:
-          fact.ref?.type === 'ITEM_PLANT'
-            ? { type: 'ITEM', itemId: fact.ref.itemId, plantId: fact.ref.plantId }
-            : fact.ref?.type === 'SYSTEM_SNAPSHOT'
-              ? { type: 'SYSTEM', system: fact.ref.system }
-              : undefined,
-      }),
-    ),
-    resolutions,
-    peggedDemandCount: exception.peggedDemandIds.length,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Item 360
 // ---------------------------------------------------------------------------
@@ -470,7 +187,7 @@ export interface MaterialFilters {
  */
 export function materialsTable(scenarioId: string, filters: MaterialFilters = {}): MaterialsQueryResult {
   const plan = planFor(scenarioId);
-  const snapshot = snapshotFor(scenarioId);
+  const snapshot = snapshotFor();
   const planningEpochDay = toEpochDay(plan.planningDate);
 
   const itemById = new Map(snapshot.items.map((entry) => [entry.id, entry]));
@@ -495,16 +212,6 @@ export function materialsTable(scenarioId: string, filters: MaterialFilters = {}
     supplyByKey.set(key, bucket);
   }
 
-  const exceptionsByKey = new Map<string, { count: number; exposure: number }>();
-  for (const exception of plan.exceptions) {
-    if (exception.itemId === '—') continue;
-    const key = planKey(exception.itemId, exception.plantId);
-    const bucket = exceptionsByKey.get(key) ?? { count: 0, exposure: 0 };
-    bucket.count += 1;
-    bucket.exposure += exception.impactValue;
-    exceptionsByKey.set(key, bucket);
-  }
-
   const counts = { all: 0, atRisk: 0, watch: 0, excess: 0, healthy: 0 };
   const rows: MaterialRow[] = [];
   const search = filters.search?.trim().toLowerCase();
@@ -526,7 +233,6 @@ export function materialsTable(scenarioId: string, filters: MaterialFilters = {}
     }
 
     const supply = supplyByKey.get(key) ?? { openPo: 0, expected: 0 };
-    const issues = exceptionsByKey.get(key);
     const stock = stockByKey.get(key);
     const safetyStock = itemPlan.safetyStock;
 
@@ -573,8 +279,9 @@ export function materialsTable(scenarioId: string, filters: MaterialFilters = {}
       lowestBalance: lowest === Number.POSITIVE_INFINITY ? 0 : lowest,
       stockoutDate: stockoutDay >= 0 ? fromEpochDay(planningEpochDay + stockoutDay) : null,
       status,
-      exceptionCount: issues?.count ?? 0,
-      exposure: issues?.exposure ?? 0,
+      // Money the shortfall puts at stake, valued at standard cost. The v2
+      // cockpit replaces this with the norms engine's excess/exposure pair.
+      exposure: lowest < 0 ? -lowest * item.standardCost : 0,
     });
   }
 
@@ -588,7 +295,7 @@ export function materialsTable(scenarioId: string, filters: MaterialFilters = {}
 
 export function itemDetail(scenarioId: string, itemId: string, plantId: string): ItemDetail | null {
   const plan = planFor(scenarioId);
-  const snapshot = snapshotFor(scenarioId);
+  const snapshot = snapshotFor();
   const key = planKey(itemId, plantId);
   const itemPlan = plan.plans.get(key);
   const item = snapshot.items.find((entry) => entry.id === itemId);
@@ -598,7 +305,6 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
   const planningEpochDay = toEpochDay(plan.planningDate);
   const dates = Array.from({ length: plan.horizonDays + 1 }, (_, day) => fromEpochDay(planningEpochDay + day));
   const stock = snapshot.stock.find((entry) => entry.itemId === itemId && entry.plantId === plantId);
-  const context = buildRowContext(plan, snapshot);
 
   const demandByType = splitDemandByType(snapshot, plan, itemId, plantId, planningEpochDay, plan.horizonDays);
   const supplyRows = splitSupply(snapshot, itemId, plantId, planningEpochDay, plan.horizonDays);
@@ -634,10 +340,6 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
     { key: 'cover', label: 'Days of cover', values: Array.from(itemPlan.daysOfCover) },
   ];
 
-  const exceptions = plan.exceptions
-    .filter((exception) => exception.itemId === itemId && exception.plantId === plantId)
-    .map((exception) => toRow(exception, plan, context));
-
   return {
     itemId,
     plantId,
@@ -666,7 +368,6 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
     daysOfCover: Array.from(itemPlan.daysOfCover),
     grid,
     parameters: parameterHealth(master, item, itemPlan, snapshot),
-    exceptions,
     healthScore: healthScoreFor(master, snapshot, itemId, plantId),
     position: itemPosition(itemPlan, snapshot, itemId, plantId, planningEpochDay),
     purchaseOrders: purchaseOrders(snapshot, itemId, plantId),
@@ -955,7 +656,7 @@ function parameterHealth(
       ? zFor(master.serviceLevelTarget) * sigma * Math.sqrt(Math.max(master.leadTimeDays, 1))
       : null;
 
-  const staleAfter = IMPACT_CONFIG.paramFreshnessDays;
+  const staleAfter = PARAM_FRESHNESS_DAYS;
   const ageDays =
     toEpochDay(snapshot.systemSnapshots[0]?.lastSyncAt.slice(0, 10) ?? master.paramsLastChangedOn) -
     toEpochDay(master.paramsLastChangedOn);
@@ -970,8 +671,7 @@ function parameterHealth(
         master.leadTimeDays === null
           ? 'MISSING'
           : observedLeadTime !== null &&
-              Math.abs(observedLeadTime - master.leadTimeDays) / Math.max(master.leadTimeDays, 1) >
-                IMPACT_CONFIG.drift.leadTimeDriftPct
+              Math.abs(observedLeadTime - master.leadTimeDays) / Math.max(master.leadTimeDays, 1) > LEAD_TIME_DRIFT_PCT
             ? 'DRIFTED'
             : 'FRESH',
       note: receipts.length > 0 ? `Across the last ${Math.min(receipts.length, 6)} receipts` : null,
@@ -986,7 +686,7 @@ function parameterHealth(
           ? 'MISSING'
           : calculatedSafetyStock !== null &&
               Math.abs(calculatedSafetyStock - master.safetyStock) / Math.max(master.safetyStock, 1) >
-                IMPACT_CONFIG.drift.safetyStockMisalignPct
+                SAFETY_STOCK_MISALIGN_PCT
             ? 'DRIFTED'
             : 'FRESH',
       note: `z(${master.serviceLevelTarget.toFixed(2)}) · σ ${formatQty(sigma, item.baseUom)} · √lead time`,
@@ -1053,7 +753,7 @@ function zFor(serviceLevel: number): number {
  * rather than asserted.
  */
 export function healthScoreFor(master: ItemPlant, snapshot: PlanningSnapshot, itemId: string, plantId: string): number {
-  const weights = IMPACT_CONFIG.healthWeights;
+  const weights = HEALTH_WEIGHTS;
 
   const required = [
     master.mrpType,
@@ -1067,7 +767,7 @@ export function healthScoreFor(master: ItemPlant, snapshot: PlanningSnapshot, it
   const sap = snapshot.systemSnapshots.find((entry) => entry.system === 'SAP');
   const ageDays =
     toEpochDay(sap?.lastSyncAt.slice(0, 10) ?? master.paramsLastChangedOn) - toEpochDay(master.paramsLastChangedOn);
-  const freshness = Math.max(0, 1 - ageDays / (IMPACT_CONFIG.paramFreshnessDays * 3));
+  const freshness = Math.max(0, 1 - ageDays / (PARAM_FRESHNESS_DAYS * 3));
 
   const kinaxis = snapshot.systemSnapshots.find((entry) => entry.system === 'KINAXIS');
   const kinaxisRow = kinaxis?.itemPlantParams.find((row) => row.itemId === itemId && row.plantId === plantId);
@@ -1083,164 +783,6 @@ export function healthScoreFor(master: ItemPlant, snapshot: PlanningSnapshot, it
   return Math.round(
     (completeness * weights.completeness + freshness * weights.freshness + consistency * weights.consistency) * 100,
   );
-}
-
-// ---------------------------------------------------------------------------
-// Blast radius
-// ---------------------------------------------------------------------------
-
-export function blastRadius(scenarioId: string, exceptionId: string): BlastRadius | null {
-  const plan = planFor(scenarioId);
-  const snapshot = snapshotFor(scenarioId);
-  const exception = plan.exceptions.find((entry) => entry.id === exceptionId);
-  if (!exception) return null;
-
-  const itemById = new Map(snapshot.items.map((item) => [item.id, item]));
-  const customerById = new Map(snapshot.customers.map((customer) => [customer.id, customer]));
-  const demandById = new Map<string, DemandElement>();
-  for (const element of snapshot.demand) demandById.set(element.id, element);
-
-  const pegged = exception.peggedDemandIds
-    .map((id) => demandById.get(id))
-    .filter((element): element is DemandElement => Boolean(element));
-
-  const nodes: BlastRadiusNode[] = [];
-  const edges: BlastRadiusEdge[] = [];
-  const rootItem = itemById.get(exception.itemId);
-
-  const rootId = `item:${exception.itemId}`;
-  nodes.push({
-    id: rootId,
-    kind: 'COMPONENT',
-    label: exception.itemId,
-    sublabel: rootItem?.description ?? '',
-    valueAtRisk: exception.impactValue,
-    level: 0,
-  });
-
-  // Group the pegged demand by finished item, then list the orders behind it.
-  const byFinishedItem = new Map<string, DemandElement[]>();
-  for (const element of pegged) {
-    const bucket = byFinishedItem.get(element.itemId);
-    if (bucket) bucket.push(element);
-    else byFinishedItem.set(element.itemId, [element]);
-  }
-
-  const orders: AffectedOrder[] = [];
-  let totalValue = 0;
-  let totalMargin = 0;
-  const keyAccounts = new Set<string>();
-
-  for (const [finishedItemId, elements] of byFinishedItem) {
-    const finished = itemById.get(finishedItemId);
-    const value = elements.reduce((sum, element) => sum + element.qty * element.pricePerUnit, 0);
-    const margin = elements.reduce((sum, element) => sum + element.qty * element.marginPerUnit, 0);
-    totalValue += value;
-    totalMargin += margin;
-
-    const finishedNodeId = `item:${finishedItemId}`;
-    nodes.push({
-      id: finishedNodeId,
-      kind: 'FINISHED',
-      label: finishedItemId,
-      sublabel: finished?.description ?? '',
-      valueAtRisk: value,
-      level: 1,
-    });
-    edges.push({
-      id: `${rootId}->${finishedNodeId}`,
-      source: rootId,
-      target: finishedNodeId,
-      qty: elements.reduce((sum, element) => sum + element.qty, 0),
-    });
-
-    // Forecast is rolled up per finished item; committed orders stay individual,
-    // because a named account with a promised date is a different conversation
-    // from a forecast line and the panel should not blur the two.
-    let forecastQty = 0;
-    let forecastLineValue = 0;
-    let forecastMargin = 0;
-    let forecastDate = '';
-
-    for (const element of elements) {
-      const lineValue = element.qty * element.pricePerUnit;
-
-      if (element.type !== 'SALES_ORDER' || !element.customerId) {
-        forecastQty += element.qty;
-        forecastLineValue += lineValue;
-        forecastMargin += element.qty * element.marginPerUnit;
-        if (!forecastDate || element.requiredDate < forecastDate) forecastDate = element.requiredDate;
-        continue;
-      }
-
-      const customer = customerById.get(element.customerId);
-      if (customer?.isKeyAccount) keyAccounts.add(customer.id);
-
-      const orderNodeId = `order:${element.id}`;
-      nodes.push({
-        id: orderNodeId,
-        kind: 'ORDER',
-        label: customer?.name ?? element.customerId,
-        sublabel: `${element.channel ?? ''} · ${element.requiredDate}`,
-        valueAtRisk: lineValue,
-        level: 2,
-      });
-      edges.push({
-        id: `${finishedNodeId}->${orderNodeId}`,
-        source: finishedNodeId,
-        target: orderNodeId,
-        qty: element.qty,
-      });
-
-      orders.push({
-        id: element.id,
-        kind: 'COMMITTED',
-        customerName: customer?.name ?? element.customerId,
-        channel: element.channel,
-        itemId: finishedItemId,
-        itemDescription: finished?.description ?? '',
-        qty: element.qty,
-        value: lineValue,
-        marginValue: element.qty * element.marginPerUnit,
-        requiredDate: element.requiredDate,
-        isKeyAccount: customer?.isKeyAccount ?? false,
-      });
-    }
-
-    if (forecastQty > 0) {
-      orders.push({
-        id: `forecast:${finishedItemId}`,
-        kind: 'FORECAST',
-        customerName: 'Forecast demand',
-        channel: null,
-        itemId: finishedItemId,
-        itemDescription: finished?.description ?? '',
-        qty: forecastQty,
-        value: forecastLineValue,
-        marginValue: forecastMargin,
-        requiredDate: forecastDate,
-        isKeyAccount: false,
-      });
-    }
-  }
-
-  // Committed first, then forecast; value-ranked within each.
-  orders.sort((a, b) => (a.kind !== b.kind ? (a.kind === 'COMMITTED' ? -1 : 1) : b.value - a.value));
-
-  return {
-    rootItemId: exception.itemId,
-    rootPlantId: exception.plantId,
-    nodes,
-    edges,
-    orders,
-    finishedGoodsCount: byFinishedItem.size,
-    totalValueAtRisk: totalValue,
-    totalMarginAtRisk: totalMargin,
-    committedValue: orders.filter((order) => order.kind === 'COMMITTED').reduce((sum, order) => sum + order.value, 0),
-    forecastValue: orders.filter((order) => order.kind === 'FORECAST').reduce((sum, order) => sum + order.value, 0),
-    committedOrderCount: orders.filter((order) => order.kind === 'COMMITTED').length,
-    keyAccountCount: keyAccounts.size,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,17 +806,16 @@ export function previewOverride(
   value: number | null,
 ): OverridePreview | null {
   const plan = planFor(scenarioId);
-  const snapshot = snapshotFor(scenarioId);
+  const snapshot = snapshotFor();
   const master = snapshot.itemPlants.find((entry) => entry.itemId === itemId && entry.plantId === plantId);
   if (!master) return null;
 
-  const options = planningOptions(scenarioId);
-  const result = simulate(snapshot, plan, [{ kind: 'SET_ITEM_PLANT_PARAM', itemId, plantId, field, value }], options);
+  const after = planWithParamOverride(scenarioId, itemId, plantId, field, value);
+  if (!after) return null;
 
   const key = planKey(itemId, plantId);
   const beforePlan = plan.plans.get(key);
-  const afterPlan = result.plan.plans.get(key);
-  const afterMaster = result.snapshot.itemPlants.find((entry) => entry.itemId === itemId && entry.plantId === plantId);
+  const afterPlan = after.plan.plans.get(key);
 
   const lowest = (series: Float64Array | undefined): number => {
     if (!series) return 0;
@@ -1292,64 +833,13 @@ export function previewOverride(
     systemValue: (master[field] as number | null) ?? null,
     overrideValue: value,
     before: explainRecommendation(plan, snapshot, master, itemId, plantId),
-    after: afterMaster ? explainRecommendation(result.plan, result.snapshot, afterMaster, itemId, plantId) : null,
+    after: explainRecommendation(after.plan, after.snapshot, after.master, itemId, plantId),
     beforeBalance: beforePlan ? downsample(beforePlan.projectedAvailableFeasible, 60) : [],
     afterBalance: afterPlan ? downsample(afterPlan.projectedAvailableFeasible, 60) : [],
     dates: sampleDates(toEpochDay(plan.planningDate), plan.horizonDays, 60),
-    exceptionCountDelta: result.diff.kpiDelta.exceptionCount,
-    exposureDelta: result.diff.kpiDelta.totalExposure,
     beforeLowestBalance: lowest(beforePlan?.projectedAvailableFeasible),
     afterLowestBalance: lowest(afterPlan?.projectedAvailableFeasible),
-    elapsedMs: result.plan.elapsedMs,
-  };
-}
-
-export function simulateResolution(
-  scenarioId: string,
-  exceptionId: string,
-  resolutionId: string,
-): SimulationDiff | null {
-  const plan = planFor(scenarioId);
-  const exception = plan.exceptions.find((entry) => entry.id === exceptionId);
-  const resolution = plan.resolutions.get(resolutionId);
-  if (!exception || !resolution) return null;
-
-  const options = planningOptions(scenarioId);
-  const before = snapshotFor(scenarioId);
-  const result = simulate(before, plan, resolution.mutations, options);
-
-  const key = planKey(exception.itemId, exception.plantId);
-  const beforePlan = plan.plans.get(key);
-  const afterPlan = result.plan.plans.get(key);
-  const planningEpochDay = toEpochDay(plan.planningDate);
-
-  const brief = (entry: PlanningException) => ({
-    id: entry.id,
-    code: entry.code,
-    itemId: entry.itemId,
-    plantId: entry.plantId,
-    impactValue: entry.impactValue,
-    narrative: entry.narrative,
-  });
-
-  return {
-    resolutionId,
-    resolutionLabel: resolution.label,
-    elapsedMs: result.plan.elapsedMs,
-    resolved: result.diff.resolved.slice(0, 40).map(brief),
-    created: result.diff.created.slice(0, 40).map(brief),
-    unchanged: result.diff.unchanged,
-    kpiDelta: result.diff.kpiDelta,
-    before: beforePlan ? downsample(beforePlan.projectedAvailableFeasible, 60) : [],
-    after: afterPlan ? downsample(afterPlan.projectedAvailableFeasible, 60) : [],
-    dates: sampleDates(planningEpochDay, plan.horizonDays, 60),
-    writebacks: proposeWritebacks(resolution.mutations, plan.planningDate).map((payload) => ({
-      system: payload.system,
-      method: payload.method,
-      endpoint: payload.endpoint,
-      description: payload.description,
-      body: payload.body,
-    })),
+    elapsedMs: after.plan.elapsedMs,
   };
 }
 

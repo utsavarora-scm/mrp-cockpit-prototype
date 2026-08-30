@@ -1,15 +1,14 @@
 /**
- * Editing a planning parameter from the Item 360 grid.
+ * Editing a planning parameter from the material screen.
  *
- * This is the "change that number and re-run it" answer. The edit is committed
- * to the session as a change like any other, the plan cache drops, and the next
- * read re-plans — which is why the cockpit queue reorders behind you.
+ * This is the "change that number and re-run it" answer. The override is
+ * recorded with its reason and its before/after, the plan cache drops, and the
+ * next read re-plans — which is why every screen moves behind you.
  */
 
 import { NextResponse } from 'next/server';
-import type { SnapshotMutation } from '@repo/domain';
 
-import { commitChange } from '@/lib/server/planning-session';
+import { recordOverride, snapshotFor, type OverridableField } from '@/lib/server/planning-session';
 import { itemDetail, previewOverride } from '@/lib/server/projections';
 
 export const dynamic = 'force-dynamic';
@@ -56,7 +55,7 @@ export async function POST(request: Request, context: { params: Promise<{ itemId
     return NextResponse.json({ error: 'That value is not a number the plan can use.' }, { status: 400 });
   }
 
-  const field = body.field as Extract<SnapshotMutation, { kind: 'SET_ITEM_PLANT_PARAM' }>['field'];
+  const field = body.field as OverridableField;
 
   // Weighing it is a real run on a cloned snapshot — nothing is committed, and
   // the planner sees the same arithmetic they would get by applying it.
@@ -66,24 +65,22 @@ export async function POST(request: Request, context: { params: Promise<{ itemId
     return NextResponse.json(preview);
   }
 
-  const mutation: SnapshotMutation = {
-    kind: 'SET_ITEM_PLANT_PARAM',
+  const reason = body.reason?.trim();
+  if (!reason) {
+    return NextResponse.json({ error: 'An override needs a reason before it can be applied.' }, { status: 400 });
+  }
+
+  const master = snapshotFor().itemPlants.find((entry) => entry.itemId === itemId && entry.plantId === plantId);
+  if (!master) return NextResponse.json({ error: 'That item has no planning master to override.' }, { status: 404 });
+
+  recordOverride({
     itemId,
     plantId,
     field,
-    value: body.value ?? null,
-  };
-
-  const reason = body.reason?.trim();
-  commitChange({
-    exceptionId: '—',
-    resolutionId: '—',
-    label: `${body.field} set to ${body.value ?? 'not maintained'} on ${itemId} at ${plantId}${
-      reason ? ` — ${reason}` : ''
-    }`,
-    mutations: [mutation],
-    appliedByAgent: false,
-    estimatedImpact: 0,
+    before: (master[field] as number | null) ?? null,
+    after: body.value ?? null,
+    reason,
+    actor: 'planner',
   });
 
   const detail = itemDetail(scenarioId, itemId, plantId);

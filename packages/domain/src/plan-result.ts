@@ -4,8 +4,6 @@
  * projects narrow, serialisable views out of it.
  */
 
-import type { PlanningException } from './exceptions';
-import type { Resolution } from './mutations';
 import type { DemandElement, SupplyElement } from './transactional';
 
 /** One item at one plant, bucketed daily across the horizon. */
@@ -80,49 +78,6 @@ export interface PlannedOrderExplanation {
   totalOffsetDays: number;
 }
 
-export interface PeggingAllocation {
-  demandElementId: string;
-  supplyElementId: string | null;
-  /** null supply means the quantity came from opening stock. */
-  fromOpeningStock: boolean;
-  qty: number;
-}
-
-export interface PeggingGraph {
-  /** FIFO allocations of supply (and opening stock) to demand, per item-plant. */
-  allocations: PeggingAllocation[];
-  /** demandElementId → the supply element whose explosion created it. */
-  dependentDemandParent: Map<string, string>;
-  /** supplyElementId → demand element ids that supply covers. */
-  supplyToDemand: Map<string, string[]>;
-  /**
-   * Independent-demand leaves (sales orders / forecast) reachable upward from a
-   * supply element. This is what draws the blast radius.
-   */
-  traceUp(supplyElementId: string): DemandElement[];
-  /** Same, starting from an item-plant shortage rather than a specific order. */
-  traceUpFromItemPlant(itemId: string, plantId: string): DemandElement[];
-}
-
-export interface PlanKpis {
-  totalExposure: number;
-  exceptionCount: number;
-  /** Share of total exposure carried by the top 12 exceptions, 0–1. */
-  top12Share: number;
-  /** How many exceptions, ranked by money, it takes to reach 70% of exposure. */
-  exceptionsToSeventyPercent: number;
-  /** That count as a share of all exceptions, 0–1 — the Pareto in one number. */
-  seventyPercentHeadShare: number;
-  projectedFillRate: number;
-  inventoryValue: number;
-  daysOnHand: number;
-  excessObsoleteExposure: number;
-  expediteSpendMtd: number;
-  autoResolvedPct: number;
-  exceptionsByClass: Record<'A' | 'B' | 'C' | 'D', number>;
-  exposureByClass: Record<'A' | 'B' | 'C' | 'D', number>;
-}
-
 export interface MrpResult {
   scenarioId: string;
   planningDate: string;
@@ -135,10 +90,6 @@ export interface MrpResult {
   orderExplanations: Map<string, PlannedOrderExplanation[]>;
   /** Dependent demand the engine generated while exploding BOMs. */
   derivedDemand: DemandElement[];
-  exceptions: PlanningException[];
-  resolutions: Map<string, Resolution>;
-  pegging: PeggingGraph;
-  kpis: PlanKpis;
   /** Item-plants whose BOM participates in a cycle — planned around, not thrown on. */
   circularItemPlants: string[];
 }

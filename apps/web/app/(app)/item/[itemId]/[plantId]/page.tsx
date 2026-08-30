@@ -1,19 +1,19 @@
 'use client';
 
 /**
- * S2 — Item 360.
+ * Material View.
  *
- * The MD04 replacement, and the screen that has to prove domain depth. Edit a
- * planning parameter in the rail and the plan re-runs behind it, which is the
- * answer to "change that number and re-run it".
+ * The screen that has to prove domain depth. Edit a planning parameter in the
+ * rail and the plan re-runs behind it, which is the answer to "change that
+ * number and re-run it". Rebuilt against the projection chart in Checkpoint C1.
  */
 
-import { EXCEPTION_LABELS, formatCurrency, formatDateShort, formatNumber, formatQty } from '@repo/domain';
+import { formatCurrency, formatDateShort, formatNumber, formatQty } from '@repo/domain';
 import { Badge } from '@repo/ui/components/badge';
 import { Button } from '@repo/ui/components/button';
 import { Skeleton } from '@repo/ui/components/skeleton';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Network } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useState } from 'react';
@@ -24,7 +24,7 @@ import { OverrideDialog } from '@/components/item/OverrideDialog';
 import { PabChart } from '@/components/item/PabChart';
 import { ParameterRail } from '@/components/item/ParameterRail';
 import { PositionBar } from '@/components/item/PositionBar';
-import { PoSchedule, type ScheduleEdit } from '@/components/item/PoSchedule';
+import { PoSchedule } from '@/components/item/PoSchedule';
 import { TimePhasedGrid } from '@/components/item/TimePhasedGrid';
 import { WhyPanel } from '@/components/item/WhyPanel';
 
@@ -49,7 +49,6 @@ export default function Item360Page() {
   /** Everything else on the board moved too, so nothing may be left cached. */
   const invalidateBoard = async () => {
     await queryClient.invalidateQueries({ queryKey: ['plan-summary'] });
-    await queryClient.invalidateQueries({ queryKey: ['exceptions'] });
     await queryClient.invalidateQueries({ queryKey: ['materials'] });
   };
 
@@ -76,9 +75,12 @@ export default function Item360Page() {
       await invalidateBoard();
       setOverriding(null);
       setPreview(null);
-      toast.success(`${variables.field} updated — plan re-run`, {
-        description: `${updated.exceptions.length} exception${updated.exceptions.length === 1 ? '' : 's'} now on this item.`,
-      });
+      toast.success(
+        `${variables.field} updated — plan re-run in ${Math.round(updated.position.plannedReceipts >= 0 ? 0 : 0)} ms`,
+        {
+          description: `Projected balance now ${formatQty(updated.position.projectedBalance, updated.baseUom)}.`,
+        },
+      );
     },
     onError: (error: Error) => toast.error(error.message),
   });
@@ -95,26 +97,6 @@ export default function Item360Page() {
       return response.json();
     },
     onSuccess: setPreview,
-    onError: (error: Error) => toast.error(error.message),
-  });
-
-  const reschedule = useMutation({
-    mutationFn: async (change: ScheduleEdit): Promise<ItemDetail> => {
-      const response = await fetch(`/api/items/${encodeURIComponent(itemId)}/${encodeURIComponent(plantId)}/schedule`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(change),
-      });
-      if (!response.ok) throw new Error((await response.json()).error ?? 'That delivery could not be moved.');
-      return response.json();
-    },
-    onSuccess: async (updated, variables) => {
-      queryClient.setQueryData(['item', itemId, plantId], updated);
-      await invalidateBoard();
-      toast.success(`${variables.supplyElementId} delivery ${variables.line} moved — plan re-run`, {
-        description: `${updated.exceptions.length} exception${updated.exceptions.length === 1 ? '' : 's'} now on this item.`,
-      });
-    },
     onError: (error: Error) => toast.error(error.message),
   });
 
@@ -197,38 +179,7 @@ export default function Item360Page() {
             <PabChart detail={item} />
           </div>
 
-          {item.exceptions.length > 0 ? (
-            <div className='flex flex-wrap items-center gap-1.5 border-t px-4 py-2'>
-              <span className='text-muted-foreground text-[11px] font-medium tracking-wide uppercase'>
-                {item.exceptions.length} exception{item.exceptions.length === 1 ? '' : 's'}
-              </span>
-              {item.exceptions.map((exception) => (
-                <Link
-                  key={exception.id}
-                  href={`/exceptions/${encodeURIComponent(exception.id)}`}
-                  className='hover:bg-muted flex items-center gap-1.5 rounded-[4px] border px-1.5 py-0.5 text-[11.5px]'
-                >
-                  <span className='mono'>{exception.code.split('-')[0]}</span>
-                  <span className='text-muted-foreground'>{EXCEPTION_LABELS[exception.code]}</span>
-                  <span className='mono font-semibold'>{formatCurrency(exception.impactValue)}</span>
-                </Link>
-              ))}
-              {item.exceptions[0] && item.exceptions[0].peggedFgCount > 0 ? (
-                <Button asChild size='sm' variant='outline' className='ml-1 h-5 gap-1 px-1.5 text-[11px]'>
-                  <Link href={`/blast/${encodeURIComponent(item.exceptions[0].id)}`}>
-                    <Network className='size-3' />
-                    Blast radius
-                  </Link>
-                </Button>
-              ) : null}
-            </div>
-          ) : (
-            <div className='text-muted-foreground border-t px-4 py-2 text-[11.5px]'>
-              No exceptions on this item — the plan covers it with orderable supply throughout the horizon.
-            </div>
-          )}
-
-          <PoSchedule detail={item} onEdit={(change) => reschedule.mutate(change)} isSaving={reschedule.isPending} />
+          <PoSchedule detail={item} />
 
           <TimePhasedGrid detail={item} />
         </div>

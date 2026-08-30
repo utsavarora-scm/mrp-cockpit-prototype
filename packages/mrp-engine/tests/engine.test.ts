@@ -248,7 +248,7 @@ describe('BOM explosion', () => {
     expect(result.order).toHaveLength(2);
   });
 
-  it('raises B-CIRCULAR-BOM rather than throwing', () => {
+  it('reports a circular BOM rather than throwing', () => {
     const base = snapshot({
       items: [item({ id: 'A' }), item({ id: 'B' })],
       itemPlants: [itemPlant({ itemId: 'A', plantId: 'P1' }), itemPlant({ itemId: 'B', plantId: 'P1' })],
@@ -258,7 +258,7 @@ describe('BOM explosion', () => {
     });
 
     const plan = runMrp(base, options());
-    expect(plan.exceptions.some((exception) => exception.code === 'B-CIRCULAR-BOM')).toBe(true);
+    expect(plan.circularItemPlants.sort()).toEqual([planKey('A', 'P1'), planKey('B', 'P1')]);
   });
 
   it('passes demand straight through a phantom, with no order and no offset', () => {
@@ -290,44 +290,6 @@ describe('BOM explosion', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('pegging', () => {
-  it('traces a component shortage up to the customer orders behind it', () => {
-    const base = snapshot({
-      items: [item({ id: 'FG', type: 'FG', baseUom: 'EA' }), item({ id: 'RM', type: 'RM' })],
-      itemPlants: [
-        itemPlant({ itemId: 'FG', plantId: 'P1', procurementType: 'MAKE' }),
-        itemPlant({ itemId: 'RM', plantId: 'P1', leadTimeDays: 5 }),
-      ],
-      boms: [bom('FG', 'P1', 'RM', 2)],
-      stock: [stock('FG', 'P1', 0), stock('RM', 'P1', 0)],
-      demand: [
-        demand({
-          id: 'SO-1',
-          itemId: 'FG',
-          plantId: 'P1',
-          qty: 10,
-          requiredDate: addDays(PLANNING_DATE, 8),
-          pricePerUnit: 5,
-        }),
-        demand({
-          id: 'SO-2',
-          itemId: 'FG',
-          plantId: 'P1',
-          qty: 4,
-          requiredDate: addDays(PLANNING_DATE, 12),
-          pricePerUnit: 5,
-        }),
-      ],
-    });
-
-    const plan = runMrp(base, options());
-    const traced = plan.pegging.traceUpFromItemPlant('RM', 'P1');
-    expect(traced.map((element) => element.id).sort()).toEqual(['SO-1', 'SO-2']);
-  });
-});
-
-// ---------------------------------------------------------------------------
-
 describe('order supersession', () => {
   it('does not raise an order when existing supply already restores the buffer', () => {
     // A ten-day lead time puts the release date in the past, which is the case
@@ -342,7 +304,6 @@ describe('order supersession', () => {
 
     const plan = runMrp(base, options());
     expect(plan.plannedOrders).toHaveLength(0);
-    expect(plan.exceptions.some((exception) => exception.code === 'A5-RESCHEDULE-OUT')).toBe(true);
   });
 
   it('still raises an order when the gap goes negative before supply arrives', () => {

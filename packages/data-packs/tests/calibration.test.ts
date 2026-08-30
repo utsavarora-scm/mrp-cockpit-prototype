@@ -1,25 +1,24 @@
 /**
  * Calibration.
  *
- * The data pack's job is not only to be realistic but to land the plan in a
- * defensible band: roughly 1,200–1,600 exceptions carrying $17–24M of exposure,
- * with the money heavily concentrated at the top of the queue. That Pareto shape
- * *is* the product argument, so it is asserted rather than hoped for.
+ * A data pack's job is not only to be realistic but to land the plan in a
+ * defensible band, and to land it in exactly the same place on every machine —
+ * the video will be re-recorded several times, and a figure that moves between
+ * takes is a figure nobody can quote.
  *
- * On concentration, the honest measure is how far down the ranked queue a
- * planner must read to cover 70% of the money — expressed as a share of the
- * queue. The source spec illustrates this as "the top 12 are 71%"; with exposure
- * ratios bounded to what each exception genuinely threatens, the real figure is
- * a low single-digit percentage of the queue rather than twelve rows. That is
- * the same argument, and it survives being checked.
+ * The v1 exception-band assertions have gone with the exception engine. What
+ * survives here is what v2 still needs from any pack: it seeds deterministically,
+ * it plans inside the performance budget, and it names nobody real.
  *
- * The report this prints is the tuning instrument — run `pnpm calibrate` after
- * changing any knob in the spec.
+ * The `gcpl-soaps` pack replaces the confectionery one in the next step, and
+ * brings the Brief §7.1 planted scenarios with it — 17 receipts on the hero
+ * material resolving to 14 matched plus 3 unmatched, the 40 packaging materials
+ * at 45 maintained days against an 18-day reality, and the ₹40–60 Cr category
+ * band. Those assertions land with the pack that can satisfy them.
  */
 
 import { describe, expect, it } from 'vitest';
-import { runMrp, PARETO_HEAD_COUNT } from '@repo/mrp-engine';
-import type { ExceptionClass, PlanningException } from '@repo/domain';
+import { runMrp } from '@repo/mrp-engine';
 
 import { getDataPack } from '../src/index';
 
@@ -27,24 +26,9 @@ const pack = getDataPack();
 const snapshot = pack.generate();
 const plan = runMrp(snapshot, pack.defaultOptions('baseline'));
 
-function currency(value: number): string {
-  if (Math.abs(value) >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
-  if (Math.abs(value) >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
-  return `$${value.toFixed(0)}`;
-}
-
-describe('confectionery data pack', () => {
+describe('data pack', () => {
   it('reports its shape', () => {
-    const byCode = new Map<string, { count: number; exposure: number }>();
-    for (const exception of plan.exceptions) {
-      const entry = byCode.get(exception.code) ?? { count: 0, exposure: 0 };
-      entry.count += 1;
-      entry.exposure += exception.impactValue;
-      byCode.set(exception.code, entry);
-    }
-
-    const classes: ExceptionClass[] = ['A', 'B', 'C', 'D'];
-    const lines: string[] = [
+    const lines = [
       '',
       '─── dataset ─────────────────────────────────────────────',
       `items            ${snapshot.items.length}`,
@@ -60,85 +44,17 @@ describe('confectionery data pack', () => {
       `derived demand   ${plan.derivedDemand.length}`,
       `max BOM level    ${Math.max(...[...plan.plans.values()].map((entry) => entry.lowLevelCode))}`,
       '',
-      '─── exceptions ──────────────────────────────────────────',
-      `count            ${plan.kpis.exceptionCount}      (target 1,200–1,400)`,
-      `exposure         ${currency(plan.kpis.totalExposure)}   (target $17–20M)`,
-      `top ${PARETO_HEAD_COUNT} share      ${(plan.kpis.top12Share * 100).toFixed(1)}%`,
-      `70% carried by  ${plan.kpis.exceptionsToSeventyPercent} exceptions (${(plan.kpis.seventyPercentHeadShare * 100).toFixed(1)}% of the queue)`,
-      `fill rate        ${(plan.kpis.projectedFillRate * 100).toFixed(1)}%`,
-      `inventory value  ${currency(plan.kpis.inventoryValue)}`,
-      `days on hand     ${plan.kpis.daysOnHand.toFixed(1)}`,
-      `auto-resolvable  ${(plan.kpis.autoResolvedPct * 100).toFixed(1)}%`,
-      '',
-      '─── by class ────────────────────────────────────────────',
-      ...classes.map(
-        (cls) =>
-          `  ${cls}   ${String(plan.kpis.exceptionsByClass[cls]).padStart(5)}   ${currency(plan.kpis.exposureByClass[cls]).padStart(9)}`
-      ),
-      '',
-      '─── by code ─────────────────────────────────────────────',
-      ...[...byCode.entries()]
-        .sort((a, b) => b[1].exposure - a[1].exposure)
-        .map(
-          ([code, entry]) =>
-            `  ${code.padEnd(32)} ${String(entry.count).padStart(5)}   ${currency(entry.exposure).padStart(9)}`
-        ),
-      '',
-      '─── top 12 by impact ────────────────────────────────────',
-      ...plan.exceptions
-        .slice(0, PARETO_HEAD_COUNT)
-        .map(
-          (exception: PlanningException, index) =>
-            `  ${String(index + 1).padStart(2)}. ${currency(exception.impactValue).padStart(9)}  ${exception.code.padEnd(30)} ${exception.itemId}@${exception.plantId}  ${exception.peggedFgCount} FG`
-        ),
-      '',
     ];
 
     // eslint-disable-next-line no-console
     console.log(lines.join('\n'));
-    expect(plan.exceptions.length).toBeGreaterThan(0);
+    expect(plan.plans.size).toBeGreaterThan(0);
   });
 
-  it('lands in the target exception band', () => {
-    expect(plan.kpis.exceptionCount).toBeGreaterThanOrEqual(1_150);
-    expect(plan.kpis.exceptionCount).toBeLessThanOrEqual(1_650);
-  });
-
-  it('lands in the target exposure band', () => {
-    expect(plan.kpis.totalExposure).toBeGreaterThanOrEqual(16_000_000);
-    expect(plan.kpis.totalExposure).toBeLessThanOrEqual(24_000_000);
-  });
-
-  it('shows the Pareto — a small slice of the queue carries most of the exposure', () => {
-    expect(plan.kpis.seventyPercentHeadShare).toBeLessThanOrEqual(0.15);
-    expect(plan.kpis.exceptionsToSeventyPercent).toBeGreaterThan(0);
-  });
-
-  it('keeps every exception class populated', () => {
-    for (const cls of ['A', 'B', 'C', 'D'] as const) {
-      expect(plan.kpis.exceptionsByClass[cls]).toBeGreaterThan(0);
-    }
-  });
-
-  it('produces the scripted lead-time drift on cocoa butter', () => {
-    const drift = plan.exceptions.find(
-      (exception) =>
-        exception.code === 'B7-LEAD-TIME-DRIFT' && exception.itemId === 'RM-CB-001' && exception.plantId === 'P1'
-    );
-    expect(drift).toBeDefined();
-    // The parameter has already put a receipt out of reach, which is what makes
-    // it the demo's hero rather than a housekeeping item.
-    expect(
-      plan.exceptions.some(
-        (exception) =>
-          exception.itemId === 'RM-CB-001' && exception.plantId === 'P1' && exception.code === 'A8-ORDER-IN-PAST'
-      )
-    ).toBe(true);
-    expect(drift?.peggedFgCount ?? 0).toBeGreaterThan(5);
-  });
-
-  it('produces the scripted absent item', () => {
-    expect(plan.exceptions.some((exception) => exception.code === 'B3-ABSENT-ITEM')).toBe(true);
+  it('explodes demand through every level of the bill of material', () => {
+    const deepest = Math.max(...[...plan.plans.values()].map((entry) => entry.lowLevelCode));
+    expect(deepest).toBeGreaterThanOrEqual(2);
+    expect(plan.derivedDemand.length).toBeGreaterThan(0);
   });
 
   it('plans the whole dataset inside the performance budget', () => {
@@ -155,9 +71,8 @@ describe('confectionery data pack', () => {
 
   it('produces the same plan on every run', () => {
     const rerun = runMrp(snapshot, pack.defaultOptions('baseline'));
-    expect(rerun.exceptions.map((e) => e.id)).toEqual(plan.exceptions.map((e) => e.id));
-    expect(rerun.exceptions.map((e) => e.impactValue)).toEqual(plan.exceptions.map((e) => e.impactValue));
-    expect(rerun.kpis.totalExposure).toBe(plan.kpis.totalExposure);
+    expect(rerun.plannedOrders.map((order) => order.id)).toEqual(plan.plannedOrders.map((order) => order.id));
+    expect(rerun.plannedOrders.map((order) => order.qty)).toEqual(plan.plannedOrders.map((order) => order.qty));
   });
 
   it('names no real company, brand or trading partner', () => {

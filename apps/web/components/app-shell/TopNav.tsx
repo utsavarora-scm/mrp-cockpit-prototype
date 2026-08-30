@@ -3,10 +3,11 @@
 /**
  * The top bar.
  *
- * Nine screens as tabs, so the full window width goes to the grids and the
- * graph. The Run MRP button lives here permanently and shows the elapsed
- * milliseconds of the last run — a full re-plan in well under a second is worth
- * seeing happen, not worth hiding behind a spinner.
+ * One bar, no sidebar: the previous build's nine nav destinations are the main
+ * reason it read as confusing. Movement between screens is by clicking data.
+ * The re-plan button stays here permanently and shows the elapsed milliseconds
+ * of the last run — a full re-plan in well under a second is worth seeing
+ * happen, not worth hiding behind a spinner.
  */
 
 import { Button } from '@repo/ui/components/button';
@@ -20,18 +21,13 @@ import { usePathname } from 'next/navigation';
 import { toast } from 'sonner';
 import { cn } from '@repo/ui/lib/utils';
 
+import { PRODUCT_NAME } from '@repo/domain';
+
 import type { CockpitSummary } from '@/lib/api-types';
 
 const TABS = [
   { href: '/', label: 'Cockpit', match: (path: string) => path === '/' },
   { href: '/item', label: 'Materials', match: (path: string) => path.startsWith('/item') },
-  { href: '/exceptions', label: 'Resolve', match: (path: string) => path.startsWith('/exceptions') },
-  { href: '/blast', label: 'Blast radius', match: (path: string) => path.startsWith('/blast') },
-  { href: '/master-data', label: 'Master data', match: (path: string) => path.startsWith('/master-data') },
-  { href: '/reconciliation', label: 'Reconciliation', match: (path: string) => path.startsWith('/reconciliation') },
-  { href: '/scenarios', label: 'Scenarios', match: (path: string) => path.startsWith('/scenarios') },
-  { href: '/integration', label: 'Integration', match: (path: string) => path.startsWith('/integration') },
-  { href: '/agent', label: 'Agent', match: (path: string) => path.startsWith('/agent') },
 ];
 
 export function TopNav() {
@@ -47,7 +43,7 @@ export function TopNav() {
     onSuccess: async (summary) => {
       await queryClient.invalidateQueries();
       toast.success(`Re-planned in ${Math.round(summary.elapsedMs)} ms`, {
-        description: `${summary.exceptionCount.toLocaleString('en-US')} exceptions across ${summary.horizonDays} days`,
+        description: `${summary.planningPosition.mrpMaterials.toLocaleString('en-IN')} materials across ${summary.horizonDays} days`,
       });
     },
     onError: () => toast.error('The plan could not be re-run.'),
@@ -71,9 +67,9 @@ export function TopNav() {
       <div className='flex h-12 items-center gap-1 px-3'>
         <div className='flex items-center gap-2 pr-3'>
           <div className='bg-primary text-primary-foreground mono flex size-6 items-center justify-center rounded-[4px] text-[11px] font-semibold'>
-            EC
+            PC
           </div>
-          <span className='text-[13px] font-semibold tracking-tight'>Exception Cockpit</span>
+          <span className='text-[13px] font-semibold tracking-tight'>{PRODUCT_NAME}</span>
         </div>
 
         <Separator orientation='vertical' className='mr-1 h-5' />
@@ -123,7 +119,7 @@ export function TopNav() {
             disabled={run.isPending}
           >
             <Play className='size-3.5' />
-            {run.isPending ? 'Planning…' : 'Run MRP'}
+            {run.isPending ? 'Planning…' : 'Re-plan'}
           </Button>
 
           {run.data ? (

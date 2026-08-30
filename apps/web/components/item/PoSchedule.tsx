@@ -14,22 +14,9 @@
 
 import { formatDateShort, formatNumber, formatQty } from '@repo/domain';
 import { Badge } from '@repo/ui/components/badge';
-import { Button } from '@repo/ui/components/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@repo/ui/components/dialog';
-import { Input } from '@repo/ui/components/input';
-import { Label } from '@repo/ui/components/label';
-import { Switch } from '@repo/ui/components/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@repo/ui/components/tooltip';
 import { cn } from '@repo/ui/lib/utils';
-import { Loader2, Pencil, TriangleAlert } from 'lucide-react';
-import { useState } from 'react';
+import { TriangleAlert } from 'lucide-react';
 
 import type { DeliveryLineView, ItemDetail, PurchaseOrderView } from '@/lib/api-types';
 
@@ -77,17 +64,7 @@ function statusClass(status: DeliveryLineView['status']): string {
   return 'sev-low';
 }
 
-export function PoSchedule({
-  detail,
-  onEdit,
-  isSaving,
-}: {
-  detail: ItemDetail;
-  onEdit: (edit: ScheduleEdit) => void;
-  isSaving: boolean;
-}) {
-  const [editing, setEditing] = useState<{ order: PurchaseOrderView; line: DeliveryLineView } | null>(null);
-
+export function PoSchedule({ detail }: { detail: ItemDetail }) {
   const orders = detail.purchaseOrders;
   const totalUnconfirmed = orders.reduce((sum, order) => sum + order.unconfirmedQty, 0);
   const delayedLines = orders.reduce(
@@ -129,39 +106,15 @@ export function PoSchedule({
       ) : (
         <div className='divide-y'>
           {orders.map((order) => (
-            <OrderBlock
-              key={order.id}
-              order={order}
-              uom={detail.baseUom}
-              onEditLine={(line) => setEditing({ order, line })}
-            />
+            <OrderBlock key={order.id} order={order} uom={detail.baseUom} />
           ))}
         </div>
       )}
-
-      <EditScheduleDialog
-        editing={editing}
-        uom={detail.baseUom}
-        isSaving={isSaving}
-        onClose={() => setEditing(null)}
-        onSave={(edit) => {
-          onEdit(edit);
-          setEditing(null);
-        }}
-      />
     </div>
   );
 }
 
-function OrderBlock({
-  order,
-  uom,
-  onEditLine,
-}: {
-  order: PurchaseOrderView;
-  uom: string;
-  onEditLine: (line: DeliveryLineView) => void;
-}) {
+function OrderBlock({ order, uom }: { order: PurchaseOrderView; uom: string }) {
   const confirmedShare = order.totalQty > 0 ? order.confirmedQty / order.totalQty : 0;
 
   return (
@@ -240,17 +193,6 @@ function OrderBlock({
                   ) : null}
                 </div>
               </td>
-              <td className='grid-cell'>
-                <Button
-                  variant='ghost'
-                  size='sm'
-                  className='h-5 w-5 p-0 opacity-50 hover:opacity-100'
-                  onClick={() => onEditLine(line)}
-                  aria-label={`Edit delivery ${line.line} of ${order.id}`}
-                >
-                  <Pencil className='size-3' />
-                </Button>
-              </td>
             </tr>
           ))}
         </tbody>
@@ -287,119 +229,5 @@ function PipelineTrack({ status }: { status: DeliveryLineView['status'] }) {
         </div>
       </TooltipContent>
     </Tooltip>
-  );
-}
-
-function EditScheduleDialog({
-  editing,
-  uom,
-  isSaving,
-  onClose,
-  onSave,
-}: {
-  editing: { order: PurchaseOrderView; line: DeliveryLineView } | null;
-  uom: string;
-  isSaving: boolean;
-  onClose: () => void;
-  onSave: (edit: ScheduleEdit) => void;
-}) {
-  const [date, setDate] = useState('');
-  const [qty, setQty] = useState('');
-  const [confirmed, setConfirmed] = useState(false);
-  // Re-seed the draft whenever a different line is opened.
-  const [seededFor, setSeededFor] = useState<string | null>(null);
-
-  const openKey = editing ? `${editing.order.id}#${editing.line.line}` : null;
-  if (editing && seededFor !== openKey) {
-    setSeededFor(openKey);
-    setDate(editing.line.expectedDate);
-    setQty(String(editing.line.qty));
-    setConfirmed(editing.line.status !== 'PLANNED');
-  }
-
-  if (!editing) return null;
-  const { order, line } = editing;
-  const parsedQty = Number(qty);
-  const isValid = /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(parsedQty) && parsedQty > 0;
-
-  return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className='sm:max-w-[420px]'>
-        <DialogHeader>
-          <DialogTitle className='text-[14px]'>
-            Delivery {line.line} of <span className='mono'>{order.id}</span>
-          </DialogTitle>
-          <DialogDescription className='text-[12px]'>
-            The plan re-runs on this change. Moving a drop out is a planning event, not a note.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className='space-y-3'>
-          <div className='grid grid-cols-2 gap-3'>
-            <div className='space-y-1'>
-              <Label htmlFor='delivery-date' className='text-[11.5px]'>
-                Delivery date
-              </Label>
-              <Input
-                id='delivery-date'
-                type='date'
-                value={date}
-                onChange={(event) => setDate(event.target.value)}
-                className='mono h-7 text-[12px]'
-              />
-            </div>
-            <div className='space-y-1'>
-              <Label htmlFor='delivery-qty' className='text-[11.5px]'>
-                Quantity <span className='text-muted-foreground'>({uom})</span>
-              </Label>
-              <Input
-                id='delivery-qty'
-                value={qty}
-                onChange={(event) => setQty(event.target.value)}
-                className='mono h-7 text-[12px]'
-              />
-            </div>
-          </div>
-
-          <div className='flex items-center justify-between rounded-[5px] border px-2.5 py-2'>
-            <div>
-              <div className='text-[12px] font-medium'>Supplier has confirmed</div>
-              <p className='text-muted-foreground text-[11px]'>
-                Confirmed quantity counts as supply that is genuinely coming.
-              </p>
-            </div>
-            <Switch checked={confirmed} onCheckedChange={setConfirmed} aria-label='Supplier has confirmed' />
-          </div>
-
-          <div className='text-muted-foreground bg-muted/40 rounded-[5px] px-2.5 py-1.5 text-[11.5px]'>
-            Currently {formatNumber(line.qty)} {uom} planned for {formatDateShort(line.plannedDate)}
-            {line.confirmedDate ? `, confirmed for ${formatDateShort(line.confirmedDate)}` : ', not yet confirmed'}.
-          </div>
-        </div>
-
-        <DialogFooter>
-          <Button variant='ghost' size='sm' className='h-7 text-[12px]' onClick={onClose} disabled={isSaving}>
-            Cancel
-          </Button>
-          <Button
-            size='sm'
-            className='h-7 gap-1.5 text-[12px]'
-            disabled={!isValid || isSaving}
-            onClick={() =>
-              onSave({
-                supplyElementId: order.id,
-                line: line.line,
-                newDate: date,
-                newQty: parsedQty,
-                confirmed,
-              })
-            }
-          >
-            {isSaving ? <Loader2 className='size-3 animate-spin' /> : null}
-            Apply and re-plan
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

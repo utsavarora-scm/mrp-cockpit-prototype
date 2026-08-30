@@ -13,7 +13,7 @@
  * audit six months later.
  */
 
-import { formatCurrency, formatNumber } from '@repo/domain';
+import { formatNumber } from '@repo/domain';
 import { Badge } from '@repo/ui/components/badge';
 import { Button } from '@repo/ui/components/button';
 import {
@@ -202,20 +202,6 @@ function PreviewBlock({ preview, uom }: { preview: OverridePreview; uom: string 
         uom={uom}
         worse={preview.afterLowestBalance < preview.beforeLowestBalance}
       />
-      <div className='flex items-baseline justify-between px-2.5 py-1.5 text-[12px]'>
-        <span className='text-muted-foreground'>Across the whole plan</span>
-        <span className='mono'>
-          <span className={cn(preview.exceptionCountDelta > 0 ? 'text-destructive' : 'text-primary')}>
-            {preview.exceptionCountDelta > 0 ? '+' : ''}
-            {preview.exceptionCountDelta} exceptions
-          </span>
-          <span className='text-muted-foreground'> · </span>
-          <span className={cn(preview.exposureDelta > 0 ? 'text-destructive' : 'text-primary')}>
-            {preview.exposureDelta > 0 ? '+' : '−'}
-            {formatCurrency(Math.abs(preview.exposureDelta))}
-          </span>
-        </span>
-      </div>
     </div>
   );
 }

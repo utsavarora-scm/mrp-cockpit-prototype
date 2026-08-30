@@ -8,7 +8,13 @@
  * rounding value, which a planner spots immediately.
  */
 
-import { IMPACT_CONFIG, type ItemPlant, type LotSizeRule } from '@repo/domain';
+import type { ItemPlant, LotSizeRule } from '@repo/domain';
+
+/** Annual cost of holding one rupee of stock, as a fraction. */
+const HOLDING_RATE = 0.22;
+
+/** Fixed cost of raising one order, used by the EOQ rule. */
+const ORDER_COST = 5000;
 
 export interface LotSizingInput {
   rule: LotSizeRule;
@@ -45,8 +51,8 @@ export interface LotSizingOutput {
 export function economicOrderQuantity(
   annualDemand: number,
   standardCost: number,
-  orderCost = IMPACT_CONFIG.orderCost,
-  holdingRate = IMPACT_CONFIG.holdingRate
+  orderCost = ORDER_COST,
+  holdingRate = HOLDING_RATE
 ): number {
   if (annualDemand <= 0 || standardCost <= 0 || holdingRate <= 0) return 0;
   return Math.sqrt((2 * annualDemand * orderCost) / (holdingRate * standardCost));

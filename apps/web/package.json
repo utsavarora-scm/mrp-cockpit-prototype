@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack --port 3000",
+    "dev": "next dev --turbopack --port 3003",
     "build": "next build",
     "start": "next start --port 3000",
     "lint": "eslint --fix",
@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@hookform/resolvers": "^5.1.1",
-    "@repo/adapters": "workspace:*",
     "@repo/data-packs": "workspace:*",
     "@repo/domain": "workspace:*",
     "@repo/mrp-engine": "workspace:*",
@@ -22,7 +21,6 @@
     "@tanstack/react-query-devtools": "^5.91.1",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.12",
-    "@xyflow/react": "^12.8.2",
     "lucide-react": "^0.475.0",
     "next": "^16.2.7",
     "next-themes": "^0.4.4",

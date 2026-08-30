@@ -6,23 +6,7 @@
  * for what it draws.
  */
 
-import type {
-  DeliveryStatus,
-  EvidenceFact,
-  ExceptionClass,
-  ExceptionCode,
-  ImpactBreakdown,
-  ResolutionType,
-  Severity,
-  SupplyType,
-  TargetSystem,
-} from '@repo/domain';
-
-export interface KpiDelta {
-  value: number;
-  /** Change since the previous run, or null when there is no previous run. */
-  delta: number | null;
-}
+import type { DeliveryStatus, SupplyType } from '@repo/domain';
 
 /**
  * The planning position in six numbers.
@@ -56,22 +40,8 @@ export interface CockpitSummary {
   scenarioId: string;
   planningDate: string;
   horizonDays: number;
+  /** Wall-clock milliseconds of the run behind this summary. */
   elapsedMs: number;
-  exceptionCount: number;
-  totalExposure: KpiDelta;
-  projectedFillRate: KpiDelta;
-  inventoryValue: KpiDelta;
-  daysOnHand: KpiDelta;
-  excessObsoleteExposure: KpiDelta;
-  expediteSpendMtd: KpiDelta;
-  autoResolvedPct: KpiDelta;
-  /** How many exceptions carry 70% of the exposure, and what share of the queue that is. */
-  exceptionsToSeventyPercent: number;
-  seventyPercentHeadShare: number;
-  exceptionsByClass: Record<ExceptionClass, number>;
-  exposureByClass: Record<ExceptionClass, number>;
-  pareto: ParetoPoint[];
-  sparklines: Record<string, number[]>;
   planningPosition: PlanningPosition;
 }
 
@@ -103,7 +73,7 @@ export interface MaterialRow {
   /** First date the orderable balance goes negative. */
   stockoutDate: string | null;
   status: 'HEALTHY' | 'WATCH' | 'AT_RISK' | 'EXCESS';
-  exceptionCount: number;
+  /** Money the projected shortfall puts at stake, at standard cost. */
   exposure: number;
 }
 
@@ -111,91 +81,6 @@ export interface MaterialsQueryResult {
   rows: MaterialRow[];
   total: number;
   counts: { all: number; atRisk: number; watch: number; excess: number; healthy: number };
-}
-
-export interface ParetoPoint {
-  rank: number;
-  impactValue: number;
-  cumulativeShare: number;
-  code: ExceptionCode;
-  itemId: string;
-  plantId: string;
-}
-
-export interface ExceptionRow {
-  id: string;
-  code: ExceptionCode;
-  exceptionClass: ExceptionClass;
-  severity: Severity;
-  impactValue: number;
-  itemId: string;
-  itemDescription: string;
-  itemType: string;
-  plantId: string;
-  abcClass: string;
-  xyzClass: string;
-  plannerCode: string | null;
-  bucketDay: number;
-  needDate: string | null;
-  daysToImpact: number | null;
-  peggedFgCount: number;
-  narrative: string;
-  bestResolutionLabel: string | null;
-  bestResolutionConfidence: number | null;
-  autoResolvable: boolean;
-  /** A short projected-balance series for the inline row expansion. */
-  sparkline: number[];
-}
-
-export interface FacetOption {
-  value: string;
-  label: string;
-  count: number;
-}
-
-export interface ExceptionQueryResult {
-  rows: ExceptionRow[];
-  total: number;
-  filteredExposure: number;
-  facets: {
-    plant: FacetOption[];
-    exceptionClass: FacetOption[];
-    itemType: FacetOption[];
-    abcClass: FacetOption[];
-    plannerCode: FacetOption[];
-    timeToImpact: FacetOption[];
-  };
-}
-
-export interface TraceLine {
-  label: string;
-  value: string;
-  detail?: string;
-  kind: EvidenceFact['kind'];
-  /** Where clicking this line goes, when it leads somewhere. */
-  link?: { type: 'ITEM'; itemId: string; plantId: string } | { type: 'SYSTEM'; system: TargetSystem };
-}
-
-export interface ResolutionCard {
-  id: string;
-  type: ResolutionType;
-  label: string;
-  rationale: string;
-  estimatedCost: number;
-  estimatedServiceImpact: number;
-  estimatedInventoryImpact: number;
-  leadTimeToEffect: number;
-  confidence: number;
-  writebackTargets: TargetSystem[];
-  score: number;
-}
-
-export interface ExceptionDetail {
-  row: ExceptionRow;
-  impact: ImpactBreakdown;
-  trace: TraceLine[];
-  resolutions: ResolutionCard[];
-  peggedDemandCount: number;
 }
 
 export interface ParameterHealth {
@@ -332,7 +217,6 @@ export interface ItemDetail {
   daysOfCover: number[];
   grid: TimePhasedRow[];
   parameters: ParameterHealth[];
-  exceptions: ExceptionRow[];
   healthScore: number;
   position: ItemPosition;
   purchaseOrders: PurchaseOrderView[];
@@ -355,93 +239,8 @@ export interface OverridePreview {
   beforeBalance: number[];
   afterBalance: number[];
   dates: string[];
-  exceptionCountDelta: number;
-  exposureDelta: number;
   /** Worst balance across the horizon either side — the stockout in one number. */
   beforeLowestBalance: number;
   afterLowestBalance: number;
   elapsedMs: number;
-}
-
-export interface BlastRadiusNode {
-  id: string;
-  kind: 'COMPONENT' | 'INTERMEDIATE' | 'FINISHED' | 'ORDER';
-  label: string;
-  sublabel: string;
-  valueAtRisk: number;
-  level: number;
-}
-
-export interface BlastRadiusEdge {
-  id: string;
-  source: string;
-  target: string;
-  qty: number;
-}
-
-export interface AffectedOrder {
-  id: string;
-  /** Committed customer orders and forecast are both at risk, but not equally. */
-  kind: 'COMMITTED' | 'FORECAST';
-  customerName: string;
-  channel: string | null;
-  itemId: string;
-  itemDescription: string;
-  qty: number;
-  value: number;
-  marginValue: number;
-  requiredDate: string;
-  isKeyAccount: boolean;
-}
-
-export interface BlastRadius {
-  rootItemId: string;
-  rootPlantId: string;
-  nodes: BlastRadiusNode[];
-  edges: BlastRadiusEdge[];
-  orders: AffectedOrder[];
-  finishedGoodsCount: number;
-  totalValueAtRisk: number;
-  totalMarginAtRisk: number;
-  /** Split out, because committed and forecast demand carry different weight. */
-  committedValue: number;
-  forecastValue: number;
-  committedOrderCount: number;
-  keyAccountCount: number;
-}
-
-export interface SimulationDiff {
-  resolutionId: string;
-  resolutionLabel: string;
-  elapsedMs: number;
-  resolved: Array<{
-    id: string;
-    code: ExceptionCode;
-    itemId: string;
-    plantId: string;
-    impactValue: number;
-    narrative: string;
-  }>;
-  created: Array<{
-    id: string;
-    code: ExceptionCode;
-    itemId: string;
-    plantId: string;
-    impactValue: number;
-    narrative: string;
-  }>;
-  unchanged: number;
-  kpiDelta: {
-    totalExposure: number;
-    exceptionCount: number;
-    projectedFillRate: number;
-    inventoryValue: number;
-    daysOnHand: number;
-    excessObsoleteExposure: number;
-  };
-  /** Before and after projected balance for the exception's own item-plant. */
-  before: number[];
-  after: number[];
-  dates: string[];
-  writebacks: Array<{ system: TargetSystem; method: string; endpoint: string; description: string; body: unknown }>;
 }

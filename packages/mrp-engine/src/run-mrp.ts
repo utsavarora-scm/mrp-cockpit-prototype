@@ -8,7 +8,6 @@
  */
 
 import {
-  IMPACT_CONFIG,
   type BomLine,
   type DemandElement,
   type Item,
@@ -18,9 +17,7 @@ import {
   type MrpOptions,
   type MrpResult,
   type PlannedOrderExplanation,
-  type PlanningException,
   type PlanningSnapshot,
-  type Resolution,
   type StockPosition,
   type SupplyElement,
   planKey,
@@ -38,13 +35,9 @@ import {
   type PlannedOrderDraft,
   type SupersededRequirement,
 } from './netting';
-import { buildPeggingGraph } from './pegging';
-import { generateExceptions } from './exceptions/generate';
-import { computeKpis } from './kpis';
-import { buildResolutions } from './resolutions';
 import { summariseObservedLeadTimes, type ObservedLeadTime } from './observed';
 
-/** Everything the exception pass needs that is not already on MrpResult. */
+/** Lookups the downstream engines need that are not already on MrpResult. */
 export interface EngineIndex {
   itemById: Map<string, Item>;
   itemPlantByKey: Map<string, ItemPlant>;
@@ -337,23 +330,11 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     computeDaysOfCover(plan.projectedAvailable, plan.grossRequirements, plan.daysOfCover, coverScratch);
   }
 
-  // ---- Pegging -----------------------------------------------------------
+  // ---- Derived demand and supply indexes --------------------------------
   const allDemand = [...snapshot.demand, ...derivedDemand];
   const demandById = new Map(allDemand.map((d) => [d.id, d]));
-  const allSupply = [...snapshot.supply, ...plannedOrders];
   for (const element of plannedOrders) supplyById.set(element.id, element);
 
-  const openingStockByKey = new Map<string, number>();
-  for (const [key, plan] of plans) openingStockByKey.set(key, plan.openingStock);
-
-  const pegging = buildPeggingGraph({
-    demand: allDemand,
-    supply: allSupply,
-    openingStock: openingStockByKey,
-    planningDate,
-  });
-
-  // ---- Exceptions, resolutions, KPIs ------------------------------------
   const index: EngineIndex = {
     itemById,
     itemPlantByKey,
@@ -372,34 +353,7 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     supersededByKey,
     planningEpochDay,
   };
-
-  const exceptions = generateExceptions({
-    snapshot,
-    options,
-    plans,
-    index,
-    pegging,
-    plannedOrders,
-    derivedDemand,
-    circular,
-    forecastConsumed,
-  });
-
-  const resolutions = buildResolutions({ snapshot, options, plans, index, exceptions, pegging });
-
-  const byException = new Map<string, Resolution[]>();
-  for (const resolution of resolutions.values()) {
-    const bucket = byException.get(resolution.exceptionId);
-    if (bucket) bucket.push(resolution);
-    else byException.set(resolution.exceptionId, [resolution]);
-  }
-  for (const exception of exceptions) {
-    const own = byException.get(exception.id) ?? [];
-    exception.resolutionIds = own.map((r) => r.id);
-    exception.autoResolvable = isAutoResolvable(exception, own, itemById.get(exception.itemId));
-  }
-
-  const kpis = computeKpis({ snapshot, options, plans, exceptions, index });
+  void index;
 
   return {
     scenarioId: options.scenarioId,
@@ -410,10 +364,6 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     plannedOrders,
     orderExplanations,
     derivedDemand,
-    exceptions,
-    resolutions,
-    pegging,
-    kpis,
     circularItemPlants: circular,
   };
 }
@@ -485,7 +435,7 @@ interface ExplodeInput {
 /**
  * One level of BOM explosion. Dependent demand lands on the parent's release
  * date — the day production actually starts consuming it — and carries
- * `parentSupplyElementId`, which is the pegging edge the blast radius follows.
+ * `parentSupplyElementId`, which is the edge that traces a requirement to its parent.
  */
 function explodeBom(input: ExplodeInput): void {
   const lines = input.bomsByParent.get(planKey(input.parentItemId, input.plantId));
@@ -562,30 +512,6 @@ function addStoDemand(input: StoDemandInput): void {
     parentSupplyElementId: input.parentSupplyElementId,
     sourceSystem: 'ENGINE',
   });
-}
-
-/**
- * Whether the autonomous agent may close this unattended.
- *
- * Every condition in the policy must hold. The list is deliberately narrow —
- * the point of the agent is to clear noise so planners see signal, not to make
- * consequential decisions on its own.
- */
-export function isAutoResolvable(
-  exception: PlanningException,
-  resolutions: Resolution[],
-  item: Item | undefined
-): boolean {
-  const policy = IMPACT_CONFIG.agentPolicy;
-  if (exception.impactValue >= policy.maxImpactValue) return false;
-  if (!item || !(policy.allowedAbcClasses as readonly string[]).includes(item.abcClass)) return false;
-  if (!(policy.allowedExceptionCodes as readonly string[]).includes(exception.code)) return false;
-
-  return resolutions.some(
-    (resolution) =>
-      resolution.confidence > policy.minConfidence &&
-      (policy.allowedResolutionTypes as readonly string[]).includes(resolution.type)
-  );
 }
 
 export function primaryVendor(vendors: ItemVendor[] | undefined): ItemVendor | null {

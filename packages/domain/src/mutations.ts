@@ -1,8 +1,7 @@
 /**
- * A resolution is never a text suggestion — it is a mutation applied to a cloned
- * snapshot, after which the engine re-runs and we diff the two plans. That is
- * what lets the workbench show both the problems a fix solves and the ones it
- * creates.
+ * A planner override, expressed as a mutation against a cloned snapshot rather
+ * than as free text. Recording the change this way is what lets an override be
+ * replayed, reversed, and written back as a concrete payload.
  */
 
 import type { LotSizeRule } from './master-data';
@@ -77,48 +76,4 @@ export type SnapshotMutation =
       arrivalDate: string;
     }
   | { kind: 'REPRIORITISE_DEMAND'; demandElementId: string; newPriority: number }
-  | { kind: 'ACCEPT_AND_MONITOR'; exceptionId: string };
-
-export type ResolutionType =
-  | 'EXPEDITE_EXISTING'
-  | 'ALTERNATE_SOURCE'
-  | 'SUBSTITUTE_COMPONENT'
-  | 'ALTERNATE_BOM'
-  | 'INVENTORY_REBALANCE'
-  | 'RESCHEDULE_IN'
-  | 'RESCHEDULE_OUT'
-  | 'CANCEL_ORDER'
-  | 'RELOT_SIZE'
-  | 'DEMAND_REPRIORITISE'
-  | 'FIX_MASTER_DATA'
-  | 'ACCEPT_AND_MONITOR';
-
-export type TargetSystem = 'SAP' | 'KINAXIS' | 'O9';
-
-export interface Resolution {
-  id: string;
-  exceptionId: string;
-  type: ResolutionType;
-  label: string;
-  /** Why this option exists, drawn from the same evidence as the exception. */
-  rationale: string;
-  mutations: SnapshotMutation[];
-  estimatedCost: number;
-  /** Δ fill rate, as a fraction. */
-  estimatedServiceImpact: number;
-  estimatedInventoryImpact: number;
-  /** Working days before the fix takes effect. */
-  leadTimeToEffect: number;
-  /** 0–1. */
-  confidence: number;
-  writebackTargets: TargetSystem[];
-}
-
-/** What a writeback would send, if anything were actually sent. */
-export interface WritebackPayload {
-  system: TargetSystem;
-  method: 'POST' | 'PATCH' | 'PUT';
-  endpoint: string;
-  description: string;
-  body: unknown;
-}
+  | { kind: 'SET_NORM'; itemId: string; plantId: string; orderDays: number; stockDays: number };
