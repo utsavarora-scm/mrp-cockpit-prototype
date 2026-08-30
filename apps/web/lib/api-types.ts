@@ -196,6 +196,9 @@ export interface ItemPosition {
 export interface ItemDetail {
   itemId: string;
   plantId: string;
+  /** The fixed planning date this view was computed against. */
+  planningDate: string;
+  horizonDays: number;
   description: string;
   itemType: string;
   baseUom: string;
@@ -207,11 +210,27 @@ export interface ItemDetail {
   lowLevelCode: number;
   stock: { unrestricted: number; blocked: number; qualityInspection: number; inTransit: number };
   safetyStock: number;
+  /** ISO date the planning parameters were last maintained. */
+  paramsLastChangedOn: string;
   /** Bucket dates, aligned with every series below. */
   dates: string[];
   grossRequirements: number[];
   scheduledReceipts: number[];
   plannedReceipts: number[];
+  /** Receipts a supplier has acknowledged, or that are already in transit. */
+  confirmedReceipts: number[];
+  /** Order lines with no supplier commitment behind them yet. */
+  unconfirmedReceipts: number[];
+  /**
+   * Balance counting only confirmed supply — the honest one.
+   *
+   * Kept separate from `balanceWithPlanned` throughout. Merging them is the
+   * "rosy picture" the buyer warned about, so the chart draws two lines and
+   * never one.
+   */
+  balanceConfirmed: number[];
+  /** Balance including unconfirmed order lines and engine-planned orders. */
+  balanceWithPlanned: number[];
   projectedAvailable: number[];
   projectedAvailableFeasible: number[];
   daysOfCover: number[];

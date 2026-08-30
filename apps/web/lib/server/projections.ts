@@ -309,6 +309,22 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
   const demandByType = splitDemandByType(snapshot, plan, itemId, plantId, planningEpochDay, plan.horizonDays);
   const supplyRows = splitSupply(snapshot, itemId, plantId, planningEpochDay, plan.horizonDays);
 
+  const { confirmed, unconfirmed } = splitConfirmedAndPlanned(
+    snapshot,
+    itemId,
+    plantId,
+    planningEpochDay,
+    plan.horizonDays,
+  );
+  const requirements = Array.from(itemPlan.grossRequirements);
+  const plannedIn = Array.from(itemPlan.plannedReceipts);
+  const opening = itemPlan.openingStock;
+
+  // Two balances, never merged. One counts only what a supplier has committed
+  // to; the other adds everything the plan is assuming on top.
+  const balanceConfirmed = runningBalance(opening, [confirmed], requirements);
+  const balanceWithPlanned = runningBalance(opening, [confirmed, unconfirmed, plannedIn], requirements);
+
   const grid: TimePhasedRow[] = [
     {
       key: 'gross',
@@ -343,6 +359,8 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
   return {
     itemId,
     plantId,
+    planningDate: plan.planningDate,
+    horizonDays: plan.horizonDays,
     description: item.description,
     itemType: item.type,
     baseUom: item.baseUom,
@@ -359,10 +377,15 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
       inTransit: stock?.inTransit ?? 0,
     },
     safetyStock: itemPlan.safetyStock,
+    paramsLastChangedOn: master.paramsLastChangedOn,
     dates,
-    grossRequirements: Array.from(itemPlan.grossRequirements),
+    grossRequirements: requirements,
     scheduledReceipts: Array.from(itemPlan.scheduledReceipts),
-    plannedReceipts: Array.from(itemPlan.plannedReceipts),
+    plannedReceipts: plannedIn,
+    confirmedReceipts: confirmed,
+    unconfirmedReceipts: unconfirmed,
+    balanceConfirmed,
+    balanceWithPlanned,
     projectedAvailable: Array.from(itemPlan.projectedAvailable),
     projectedAvailableFeasible: Array.from(itemPlan.projectedAvailableFeasible),
     daysOfCover: Array.from(itemPlan.daysOfCover),
@@ -606,6 +629,72 @@ function splitDemandByType(
   return [...byType.entries()]
     .map(([label, series]) => ({ key: `demand-${label}`, label: humanise(label), values: Array.from(series) }))
     .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/**
+ * Supply split into what is genuinely coming and what is only hoped for.
+ *
+ * The workshop showed real confusion between these, and the UI has to resolve
+ * it rather than inherit it. **Confirmed** = the vendor has acknowledged the
+ * delivery line, or it is already in transit or received. **Planned** = our own
+ * forward projection — engine-raised orders, plus order lines no supplier has
+ * yet committed to a date for.
+ *
+ * The buyer was explicit about why it matters: *"they should not be assumptions
+ * which are giving you a rosy picture, and then later you realise this is not
+ * actually going to happen."* Blending the two into one balance is exactly that
+ * rosy picture, so the two are never added together into a single series.
+ */
+function splitConfirmedAndPlanned(
+  snapshot: PlanningSnapshot,
+  itemId: string,
+  plantId: string,
+  planningEpochDay: number,
+  horizonDays: number,
+): { confirmed: number[]; unconfirmed: number[] } {
+  const buckets = horizonDays + 1;
+  const confirmed = new Array<number>(buckets).fill(0);
+  const unconfirmed = new Array<number>(buckets).fill(0);
+
+  for (const element of snapshot.supply) {
+    if (element.itemId !== itemId || element.plantId !== plantId) continue;
+
+    // An order with no delivery schedule is a single drop on its due date.
+    const lines =
+      element.schedule && element.schedule.length > 0
+        ? element.schedule
+        : [
+            {
+              line: 1,
+              qty: element.qty,
+              plannedDate: element.dueDate,
+              confirmedDate: null,
+              expectedDate: element.dueDate,
+              status: 'PLANNED' as const,
+            },
+          ];
+
+    for (const line of lines) {
+      const day = Math.max(0, Math.min(toEpochDay(line.expectedDate) - planningEpochDay, horizonDays));
+      const isCommitted = line.status === 'CONFIRMED' || line.status === 'IN_TRANSIT' || line.status === 'RECEIVED';
+      const target = isCommitted ? confirmed : unconfirmed;
+      target[day] = (target[day] as number) + line.qty;
+    }
+  }
+
+  return { confirmed, unconfirmed };
+}
+
+/** Running balance from an opening position, one bucket at a time. */
+function runningBalance(opening: number, receipts: number[][], requirements: readonly number[]): number[] {
+  const balance = new Array<number>(requirements.length).fill(0);
+  let carried = opening;
+  for (let day = 0; day < requirements.length; day += 1) {
+    for (const series of receipts) carried += series[day] as number;
+    carried -= requirements[day] as number;
+    balance[day] = carried;
+  }
+  return balance;
 }
 
 function splitSupply(

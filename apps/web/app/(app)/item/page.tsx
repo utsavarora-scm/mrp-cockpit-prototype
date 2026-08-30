@@ -191,13 +191,13 @@ function MaterialRowView({ row }: { row: MaterialRow }) {
   return (
     <tr className='hover:bg-muted/40 group'>
       <Td className='mono text-left text-[12px]'>
-        <Link href={`/item/${encodeURIComponent(row.itemId)}/${encodeURIComponent(row.plantId)}`} className='block'>
+        <Link href={`/material/${encodeURIComponent(row.itemId)}/${encodeURIComponent(row.plantId)}`} className='block'>
           {row.itemId}
         </Link>
       </Td>
       <Td className='text-muted-foreground max-w-0 truncate text-left'>
         <Link
-          href={`/item/${encodeURIComponent(row.itemId)}/${encodeURIComponent(row.plantId)}`}
+          href={`/material/${encodeURIComponent(row.itemId)}/${encodeURIComponent(row.plantId)}`}
           className='block truncate'
         >
           {row.description}

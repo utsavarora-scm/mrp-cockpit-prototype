@@ -27,7 +27,11 @@ import type { CockpitSummary } from '@/lib/api-types';
 
 const TABS = [
   { href: '/', label: 'Cockpit', match: (path: string) => path === '/' },
-  { href: '/item', label: 'Materials', match: (path: string) => path.startsWith('/item') },
+  {
+    href: '/item',
+    label: 'Materials',
+    match: (path: string) => path.startsWith('/item') || path.startsWith('/material'),
+  },
 ];
 
 export function TopNav() {
