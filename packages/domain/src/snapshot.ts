@@ -17,7 +17,7 @@ import type {
   SubstituteItem,
   Vendor,
 } from './master-data';
-import type { Customer, DemandElement, StockPosition, SupplyElement, SystemSnapshot } from './transactional';
+import type { Customer, DemandElement, StockPosition, SupplyElement } from './transactional';
 
 export interface PlanningSnapshot {
   /** Identifies the data pack this snapshot came from, e.g. 'confectionery'. */
@@ -37,8 +37,6 @@ export interface PlanningSnapshot {
   supply: SupplyElement[];
   demand: DemandElement[];
   customers: Customer[];
-  /** SAP / Kinaxis / o9, as each currently believes the world to be. */
-  systemSnapshots: SystemSnapshot[];
 }
 
 export interface MrpOptions {
@@ -52,7 +50,8 @@ export interface MrpOptions {
 }
 
 export const DEFAULT_MRP_OPTIONS: Omit<MrpOptions, 'planningDate' | 'scenarioId'> = {
-  horizonDays: 180,
+  /** 26 weeks — the raw-material horizon. A shorter one is structurally blind. */
+  horizonDays: 182,
   bucketing: 'DAY',
   forecastConsumption: { backwardDays: 20, forwardDays: 10 },
   useActualLeadTimes: false,

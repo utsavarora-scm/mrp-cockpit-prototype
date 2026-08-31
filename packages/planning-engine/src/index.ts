@@ -1,4 +1,4 @@
-export { runMrp, primaryVendor, resolveLeadTime, isPlanningActive, type EngineIndex } from './run-mrp';
+export { runMrp, primaryVendor, resolveLeadTime, isPlanningActive, componentFactor, type EngineIndex } from './run-mrp';
 export { WorkingCalendar, buildCalendars, FALLBACK_CALENDAR } from './calendar';
 export { assignLowLevelCodes, type LowLevelCodeResult } from './low-level-codes';
 export {

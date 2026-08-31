@@ -192,7 +192,7 @@ describe('forecast consumption', () => {
 // ---------------------------------------------------------------------------
 
 describe('BOM explosion', () => {
-  it('explodes multiple levels and applies component scrap', () => {
+  it('explodes multiple levels, inflating for component scrap', () => {
     const base = snapshot({
       items: [
         item({ id: 'FG', type: 'FG', baseUom: 'EA' }),
@@ -215,8 +215,30 @@ describe('BOM explosion', () => {
 
     // 10 finished units × 2 = 20 of the intermediate.
     expect(sum(sfg?.grossRequirements)).toBeCloseTo(20, 6);
-    // 20 × 3, inflated for 50% component scrap = 120.
-    expect(sum(rm?.grossRequirements)).toBeCloseTo(120, 6);
+    // 20 × 3 = 60, plus 50% again for the scrap the material loses = 90.
+    // Scrap is a property of the material and multiplies up; yield is a
+    // property of the process and divides. They are not the same arithmetic
+    // and the engine must not conflate them.
+    expect(sum(rm?.grossRequirements)).toBeCloseTo(90, 6);
+  });
+
+  it('separates operation yield from component scrap, and applies both', () => {
+    const base = snapshot({
+      items: [item({ id: 'FG', type: 'FG', baseUom: 'EA' }), item({ id: 'RM', type: 'RM' })],
+      itemPlants: [
+        itemPlant({ itemId: 'FG', plantId: 'P1', procurementType: 'MAKE' }),
+        itemPlant({ itemId: 'RM', plantId: 'P1' }),
+      ],
+      // Two per unit, on a line that yields 80%, of a material that loses 25%.
+      boms: [{ ...bom('FG', 'P1', 'RM', 2, 0.25), operationYieldPct: 0.8 }],
+      stock: [stock('FG', 'P1', 0), stock('RM', 'P1', 0)],
+      demand: [demand({ id: 'SO', itemId: 'FG', plantId: 'P1', qty: 10, requiredDate: addDays(PLANNING_DATE, 5) })],
+    });
+
+    const plan = runMrp(base, options());
+    // 10 × 2 ÷ 0.8 × 1.25 = 31.25. A planner disputing that number has to be
+    // able to see which of the two factors they are arguing with.
+    expect(sum(plan.plans.get(planKey('RM', 'P1'))?.grossRequirements)).toBeCloseTo(31.25, 6);
   });
 
   it('assigns low-level codes by the longest path, not the first one found', () => {

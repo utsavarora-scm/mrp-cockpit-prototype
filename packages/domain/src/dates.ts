@@ -99,3 +99,27 @@ export function startOfWeek(iso: string): string {
   const shift = dow === 0 ? 6 : dow - 1;
   return fromEpochDay(epochDay - shift);
 }
+
+/**
+ * ISO week number of a date — `2026-09-21` → 39.
+ *
+ * Planners and vendors both talk in week numbers, and a schedule discussed in
+ * weeks but displayed only in dates forces a translation on every reader. The
+ * ISO rule is used rather than a naive one: week 1 is the week containing the
+ * first Thursday, which is the convention every calendar in the room already
+ * agrees on.
+ */
+export function isoWeekNumber(iso: string): number {
+  const epochDay = toEpochDay(iso);
+  const dow = dayOfWeek(epochDay);
+  // Shift to the Thursday of this ISO week, then count weeks from 1 January.
+  const thursday = epochDay + (4 - (dow === 0 ? 7 : dow));
+  const year = Number(fromEpochDay(thursday).slice(0, 4));
+  const jan1 = toEpochDay(`${year}-01-01`);
+  return Math.floor((thursday - jan1) / 7) + 1;
+}
+
+/** `W39`, for axis ticks and schedule-line labels. */
+export function weekLabel(iso: string): string {
+  return `W${isoWeekNumber(iso)}`;
+}

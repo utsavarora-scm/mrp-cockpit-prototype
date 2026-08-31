@@ -1,11 +1,29 @@
 /** Transactional data — stock, supply and demand as they stand at the planning date. */
 
-export type SourceSystem = 'SAP' | 'KINAXIS' | 'O9' | 'ENGINE';
+export type SourceSystem = 'SAP' | 'ENGINE';
 
 export interface StockBatch {
   batchId: string;
   qty: number;
   expiryDate: string | null;
+}
+
+/**
+ * A quantity sitting in quality inspection, with the date it is due to clear.
+ *
+ * Undated quarantine is the single most common way a plan flatters itself: the
+ * material is on site, so it looks like stock, and it is not stock until the
+ * certificate of analysis clears. Dating it puts the release in the bucket it
+ * actually lands in — and makes visible the weeks that are only covered
+ * *because* a release is assumed to pass.
+ */
+export interface QuarantineLot {
+  batchId: string;
+  qty: number;
+  /** Gate-in date. */
+  receivedOn: string;
+  /** When it is expected to clear QC and become available. */
+  expectedReleaseDate: string;
 }
 
 export interface StockPosition {
@@ -16,6 +34,8 @@ export interface StockPosition {
   qualityInspection: number;
   inTransit: number;
   batches: StockBatch[];
+  /** The quality-inspection quantity, dated. Sums to `qualityInspection`. */
+  quarantine: QuarantineLot[];
 }
 
 export type SupplyType = 'PO' | 'PRODUCTION_ORDER' | 'PLANNED_ORDER' | 'STO';
@@ -41,13 +61,40 @@ export interface DeliveryLine {
   /** 1-based, in date order. */
   line: number;
   qty: number;
-  /** The date the order document says. */
+  /** The date the order document says — what GCPL asked for. */
   plannedDate: string;
   /** The date the supplier has committed to, where they have committed at all. */
   confirmedDate: string | null;
   /** Best current view of arrival — the confirmed date where there is one. */
   expectedDate: string;
   status: DeliveryStatus;
+
+  /**
+   * The permanent record behind this line — the quiet foundation of the norms
+   * work that comes after.
+   *
+   * None of this exists in a system at GCPL today, which is the whole point.
+   * The planner already makes the phone call; recording its answer here costs
+   * them nothing they were not already doing, and after one ordering cycle it
+   * is the only dataset from which a lead time can be measured rather than
+   * remembered.
+   */
+  /** When the purchase order line was released. */
+  releasedOn: string | null;
+  /** When the vendor acknowledged it, where they have. */
+  acknowledgedOn: string | null;
+  /** When it left the vendor, where that is known at all. */
+  dispatchedOn: string | null;
+  /** Goods receipt — gate-in. */
+  grnDate: string | null;
+  /** What actually arrived, against `qty` requested. */
+  grnQty: number | null;
+  /** Quality release against the COA — when it became available stock. */
+  qaReleasedOn: string | null;
+  /** Why the line moved or the receipt deviated. See REASON_CODES. */
+  reasonCode: string | null;
+  /** The planner's own note, alongside the code and never instead of it. */
+  note: string | null;
 }
 
 export interface SupplyElement {
@@ -102,26 +149,4 @@ export interface Customer {
   channel: Channel;
   /** Key accounts carry reputational weight beyond their order value. */
   isKeyAccount: boolean;
-}
-
-/**
- * The same logical fact, as each system currently believes it. Diffing these
- * produces the class-C cross-system reconciliation exceptions.
- */
-export interface SystemSnapshot {
-  system: 'SAP' | 'KINAXIS' | 'O9';
-  lastSyncAt: string;
-  /** Hours after which this system's sync is considered stale. */
-  syncSlaHours: number;
-  recordCount: number;
-  itemPlantParams: Array<{
-    itemId: string;
-    plantId: string;
-    leadTimeDays: number | null;
-    safetyStock: number | null;
-    lotSizeRule: string | null;
-  }>;
-  onHand: Array<{ itemId: string; plantId: string; qty: number }>;
-  demandBuckets: Array<{ itemId: string; plantId: string; weekStart: string; qty: number }>;
-  plannedOrders: Array<{ itemId: string; plantId: string; qty: number; dueDate: string; createdAt: string }>;
 }

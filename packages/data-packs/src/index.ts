@@ -2,19 +2,15 @@
  * Data pack registry.
  *
  * The engine, the API layer and every screen are written against the domain
- * model alone — no pack-specific vocabulary reaches any of them. Adding a second
- * pack is a matter of writing another generator and registering it here.
- *
- * `NEXT_PUBLIC_DATA_PACK` picks the pack the app *boots* with. It does not
- * constrain what the app can reach: the category switcher calls `getDataPack`
- * at runtime, which is what lets Act 1 and Act 2 be one unbroken take rather
- * than two recordings joined in an edit.
+ * model alone — no pack-specific vocabulary reaches any of them. Adding a
+ * second category is a matter of writing another generator and registering it
+ * here.
  */
 
 import type { MrpOptions, PlanningSnapshot } from '@repo/domain';
 
-import { GCPL_SOAPS_COUNTS, generateGcplSoapsSnapshot } from './gcpl-soaps/generate';
-import { GCPL_SOAPS_SPEC } from './gcpl-soaps/spec';
+import { generatePilotSnapshot, PILOT_COUNTS } from './gcpl-pilot/generate';
+import { PILOT_SPEC } from './gcpl-pilot/spec';
 
 export interface DataPack {
   id: string;
@@ -27,38 +23,52 @@ export interface DataPack {
   defaultOptions(scenarioId: string): MrpOptions;
 }
 
-const soaps: DataPack = {
-  id: GCPL_SOAPS_SPEC.id,
-  label: GCPL_SOAPS_SPEC.label,
-  planningDate: GCPL_SOAPS_SPEC.planningDate,
-  horizonDays: GCPL_SOAPS_SPEC.horizonDays,
-  seed: GCPL_SOAPS_SPEC.seed,
-  generate: generateGcplSoapsSnapshot,
+const pilot: DataPack = {
+  id: PILOT_SPEC.id,
+  label: PILOT_SPEC.label,
+  planningDate: PILOT_SPEC.planningDate,
+  horizonDays: PILOT_SPEC.horizonDays,
+  seed: PILOT_SPEC.seed,
+  generate: generatePilotSnapshot,
   defaultOptions: (scenarioId: string): MrpOptions => ({
-    planningDate: GCPL_SOAPS_SPEC.planningDate,
-    horizonDays: GCPL_SOAPS_SPEC.horizonDays,
+    planningDate: PILOT_SPEC.planningDate,
+    horizonDays: PILOT_SPEC.horizonDays,
     bucketing: 'DAY',
-    forecastConsumption: { backwardDays: 20, forwardDays: 10 },
+    // No forecast consumption. The engine's entry point is an agreed master
+    // production schedule — independent demand already resolved into a
+    // producible plan — so there is no forecast left to net a sales order
+    // against. Running a consumption pass over an MPS does not clean it up; it
+    // quietly deletes demand.
+    forecastConsumption: { backwardDays: 0, forwardDays: 0 },
     useActualLeadTimes: false,
     scenarioId,
   }),
 };
 
 const REGISTRY: Record<string, DataPack> = {
-  [soaps.id]: soaps,
+  [pilot.id]: pilot,
 };
 
-export const DEFAULT_DATA_PACK_ID = soaps.id;
+export const DEFAULT_DATA_PACK_ID = pilot.id;
 
 export function getDataPack(id: string | undefined = DEFAULT_DATA_PACK_ID): DataPack {
-  return REGISTRY[id ?? DEFAULT_DATA_PACK_ID] ?? soaps;
+  return REGISTRY[id ?? DEFAULT_DATA_PACK_ID] ?? pilot;
 }
 
 export function listDataPacks(): DataPack[] {
   return Object.values(REGISTRY);
 }
 
-export { GCPL_SOAPS_COUNTS, GCPL_SOAPS_SPEC };
-export { HERO, PACKAGING_DRIFT, DUAL_SOURCED } from './gcpl-soaps/spec';
+export { PILOT_COUNTS, PILOT_SPEC };
+export {
+  CHAIN_FG,
+  CHAIN_ITEMS,
+  HERO_PM,
+  HERO_RM,
+  HERO_RM_TWIN,
+  HORIZON_DAYS,
+  PACKAGING_DRIFT,
+  PLANNING_DATE,
+  SOAP_CHAIN,
+} from './gcpl-pilot/spec';
 export { mulberry32, streamFactory, type Rng } from './prng';
-export { attachDeliverySchedules, buildDeliverySchedule } from './delivery-schedule';

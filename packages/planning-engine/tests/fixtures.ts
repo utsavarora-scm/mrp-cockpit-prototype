@@ -57,6 +57,7 @@ export function item(overrides: Partial<Item> & Pick<Item, 'id'>): Item {
     description: overrides.id,
     type: 'RM',
     baseUom: 'KG',
+    itemCategoryId: null,
     abcClass: 'A',
     xyzClass: 'X',
     shelfLifeDays: null,
@@ -80,6 +81,7 @@ export function itemPlant(overrides: Partial<ItemPlant> & Pick<ItemPlant, 'itemI
     reorderPoint: null,
     leadTimeDays: 0,
     grProcessingTimeDays: 0,
+    qaQuarantineDays: 0,
     safetyStock: 0,
     safetyTimeDays: 0,
     scrapPct: 0,
@@ -92,13 +94,14 @@ export function itemPlant(overrides: Partial<ItemPlant> & Pick<ItemPlant, 'itemI
     dailyReceivingCapacity: null,
     maintainedStockDays: null,
     maintainedOrderDays: null,
+    maxNormDays: null,
     campaignCycleDays: null,
     ...overrides,
   };
 }
 
 export function stock(itemId: string, plantId: string, unrestricted: number): StockPosition {
-  return { itemId, plantId, unrestricted, blocked: 0, qualityInspection: 0, inTransit: 0, batches: [] };
+  return { itemId, plantId, unrestricted, blocked: 0, qualityInspection: 0, inTransit: 0, batches: [], quarantine: [] };
 }
 
 export function demand(
@@ -144,6 +147,8 @@ export function bom(
     componentItemId,
     qtyPer,
     componentScrapPct,
+    operationYieldPct: 1,
+    stepLabel: null,
     validFrom: '2020-01-01',
     validTo: '2099-12-31',
     alternateBomId: '1',
@@ -170,7 +175,6 @@ export function snapshot(overrides: Partial<PlanningSnapshot> = {}): PlanningSna
     supply: [],
     demand: [],
     customers: [],
-    systemSnapshots: [],
     ...overrides,
   };
 }

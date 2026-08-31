@@ -20,7 +20,9 @@ import {
   type PlanningSnapshot,
   type StockPosition,
   type SupplyElement,
+  type SupplyTier,
   planKey,
+  tierOfLine,
   toEpochDay,
   fromEpochDay,
 } from '@repo/domain';
@@ -102,26 +104,67 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
       grossRequirements: new Float64Array(buckets),
       underlyingDemand: new Float64Array(buckets),
       scheduledReceipts: new Float64Array(buckets),
+      confirmedReceipts: new Float64Array(buckets),
+      committedReceipts: new Float64Array(buckets),
+      qaReleases: new Float64Array(buckets),
       plannedReceipts: new Float64Array(buckets),
       projectedAvailable: new Float64Array(buckets),
+      projectedBeforePlanned: new Float64Array(buckets),
+      projectedConfirmedOnly: new Float64Array(buckets),
       projectedAvailableFeasible: new Float64Array(buckets),
       daysOfCover: new Float64Array(buckets),
     });
   }
 
-  // ---- Seed scheduled receipts ------------------------------------------
+  // ---- Seed scheduled receipts, line by line ----------------------------
+  //
+  // An order is netted against its *delivery lines*, not against one date on
+  // the order header. A 2,300 MT purchase order arriving as 1,150 in week 38
+  // and 1,150 in week 41 covers a completely different set of weeks from 2,300
+  // arriving in week 41, and treating the header date as the receipt date is
+  // precisely how a plan comes to say a week is covered when it is not.
   const supplyById = new Map<string, SupplyElement>();
   const supplyByKey = new Map<string, SupplyElement[]>();
   for (const element of snapshot.supply) {
     supplyById.set(element.id, element);
-    pushInto(supplyByKey, planKey(element.itemId, element.plantId), element);
-    const plan = plans.get(planKey(element.itemId, element.plantId));
+    const key = planKey(element.itemId, element.plantId);
+    pushInto(supplyByKey, key, element);
+    const plan = plans.get(key);
     if (!plan) continue;
-    // Past-due supply is pulled into the first bucket: it is still expected,
-    // and pretending it arrives on its original date would overstate coverage.
-    const day = clampDay(toEpochDay(element.dueDate) - planningEpochDay, 0, horizonDays);
-    if (day === null) continue;
-    plan.scheduledReceipts[day] = (plan.scheduledReceipts[day] as number) + element.qty;
+
+    const lines: Array<{ qty: number; date: string; tier: SupplyTier }> =
+      element.schedule && element.schedule.length > 0
+        ? element.schedule
+            .filter((line) => line.status !== 'RECEIVED')
+            .map((line) => ({ qty: line.qty, date: line.expectedDate, tier: tierOfLine(line) }))
+        : [{ qty: element.qty, date: element.dueDate, tier: element.isFirm ? 2 : 3 }];
+
+    for (const line of lines) {
+      // Past-due supply is pulled into the first bucket: it is still expected,
+      // and pretending it arrives on its original date overstates coverage.
+      const day = clampDay(toEpochDay(line.date) - planningEpochDay, 0, horizonDays);
+      if (day === null) continue;
+      plan.scheduledReceipts[day] = (plan.scheduledReceipts[day] as number) + line.qty;
+      if (line.tier === 1) plan.confirmedReceipts[day] = (plan.confirmedReceipts[day] as number) + line.qty;
+      else plan.committedReceipts[day] = (plan.committedReceipts[day] as number) + line.qty;
+    }
+  }
+
+  // ---- Quality releases --------------------------------------------------
+  //
+  // Material in quality inspection is on site and is not stock. It enters the
+  // balance on the day it clears its certificate of analysis, and until then it
+  // is drawn as its own dated line rather than folded into opening stock.
+  for (const position of snapshot.stock) {
+    const plan = plans.get(planKey(position.itemId, position.plantId));
+    if (!plan) continue;
+    for (const lot of position.quarantine) {
+      const day = clampDay(toEpochDay(lot.expectedReleaseDate) - planningEpochDay, 0, horizonDays);
+      if (day === null) continue;
+      plan.qaReleases[day] = (plan.qaReleases[day] as number) + lot.qty;
+      plan.scheduledReceipts[day] = (plan.scheduledReceipts[day] as number) + lot.qty;
+      plan.confirmedReceipts[day] = (plan.confirmedReceipts[day] as number) + lot.qty;
+    }
   }
 
   // ---- Seed gross requirements ------------------------------------------
@@ -327,6 +370,18 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
       }
     }
 
+    // The two honest curves, rolled here because everything they need is in
+    // hand: what is on the ground plus what is on order, and the same again
+    // counting only supply somebody has actually acknowledged.
+    let beforePlanned = plan.openingStock;
+    let confirmedOnly = plan.openingStock;
+    for (let day = 0; day < buckets; day += 1) {
+      beforePlanned += (plan.scheduledReceipts[day] as number) - (plan.grossRequirements[day] as number);
+      confirmedOnly += (plan.confirmedReceipts[day] as number) - (plan.grossRequirements[day] as number);
+      plan.projectedBeforePlanned[day] = beforePlanned;
+      plan.projectedConfirmedOnly[day] = confirmedOnly;
+    }
+
     computeDaysOfCover(plan.projectedAvailable, plan.grossRequirements, plan.daysOfCover, coverScratch);
   }
 
@@ -409,8 +464,7 @@ function buildUnderlyingDemand(
       if (line.isAlternate) continue;
       const target = plans.get(planKey(line.componentItemId, plan.plantId));
       if (!target) continue;
-      const factor =
-        line.qtyPer / (line.componentScrapPct > 0 && line.componentScrapPct < 1 ? 1 - line.componentScrapPct : 1);
+      const factor = componentFactor(line);
       for (let day = 0; day < buckets; day += 1) {
         target.underlyingDemand[day] = (target.underlyingDemand[day] as number) + (source[day] as number) * factor;
       }
@@ -449,8 +503,7 @@ function explodeBom(input: ExplodeInput): void {
     if (line.isAlternate) continue;
     if (line.validFrom > atIso || line.validTo < atIso) continue;
 
-    const yieldFactor = line.componentScrapPct > 0 && line.componentScrapPct < 1 ? 1 - line.componentScrapPct : 1;
-    const componentQty = (input.qty * line.qtyPer) / yieldFactor;
+    const componentQty = input.qty * componentFactor(line);
     if (componentQty <= 0) continue;
 
     const componentKey = planKey(line.componentItemId, input.plantId);
@@ -512,6 +565,21 @@ function addStoDemand(input: StoDemandInput): void {
     parentSupplyElementId: input.parentSupplyElementId,
     sourceSystem: 'ENGINE',
   });
+}
+
+/**
+ * How much component one unit of parent consumes.
+ *
+ *   qty per parent  ÷  operation yield  ×  (1 + component scrap)
+ *
+ * The two divisors are kept apart rather than folded into one factor, because
+ * the explain panel has to be able to say which of them a planner is actually
+ * arguing with.
+ */
+export function componentFactor(line: BomLine): number {
+  const operationYield = line.operationYieldPct > 0 && line.operationYieldPct <= 1 ? line.operationYieldPct : 1;
+  const scrap = line.componentScrapPct > 0 && line.componentScrapPct < 1 ? line.componentScrapPct : 0;
+  return (line.qtyPer / operationYield) * (1 + scrap);
 }
 
 export function primaryVendor(vendors: ItemVendor[] | undefined): ItemVendor | null {

@@ -27,9 +27,42 @@ export interface ItemPlantPlan {
    * this series instead, or it mistakes batching for uncertainty.
    */
   underlyingDemand: Float64Array;
+  /** Everything already on order: tier 1 + tier 2 + quality releases. */
   scheduledReceipts: Float64Array;
+  /**
+   * Tier 1 — the vendor has acknowledged this line, or it is already moving.
+   *
+   * Split from tier 2 in the engine rather than re-derived by a screen, because
+   * two screens re-deriving the same split is how they end up disagreeing about
+   * which week is safe.
+   */
+  confirmedReceipts: Float64Array;
+  /** Tier 2 — a schedule line exists and nobody has acknowledged it. */
+  committedReceipts: Float64Array;
+  /**
+   * Quantity clearing quality inspection and becoming available, on the day it
+   * clears. Part of `scheduledReceipts`, held separately because material in QA
+   * is on site and is not stock, and the plan has to be able to say so.
+   */
+  qaReleases: Float64Array;
   plannedReceipts: Float64Array;
   projectedAvailable: Float64Array;
+  /**
+   * The balance on stock and existing orders alone, with nothing the engine is
+   * merely proposing.
+   *
+   * The honest position, and the one worth arguing about: showing only the
+   * balance *after* planned orders — which most planning tools do — hides the
+   * problem behind its own proposed solution.
+   */
+  projectedBeforePlanned: Float64Array;
+  /**
+   * The same balance with tier 3 excluded *and* tier 2 excluded — what is left
+   * if only supply somebody has actually acknowledged turns up.
+   *
+   * A breach that only this curve shows is the sponsor's rosy picture, drawn.
+   */
+  projectedConfirmedOnly: Float64Array;
   /**
    * The balance if orders that would have needed placing in the past are left
    * out — the honest position, and what the stockout detector uses.

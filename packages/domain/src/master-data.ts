@@ -21,6 +21,17 @@ export interface Item {
   description: string;
   type: ItemType;
   baseUom: string;
+  /**
+   * The chemistry or specification this material *is*, independent of who
+   * supplies it.
+   *
+   * Load-bearing, and invisible in every planning screen the client has today.
+   * An imported oil and its local twin are two material codes with two lead
+   * times and one item category: when the import cannot reach a shortage, the
+   * twin sometimes can. Nothing links them on a planning screen today, which is
+   * why the lever is never used. Null where a material has no equivalent.
+   */
+  itemCategoryId: string | null;
   /** By consumption value. */
   abcClass: AbcClass;
   /** By demand variability. */
@@ -58,8 +69,17 @@ export interface ItemPlant {
   reorderPoint: number | null;
   /** Planned delivery time (BUY) or in-house production time (MAKE). */
   leadTimeDays: number | null;
-  /** Goods receipt processing time. */
+  /** Goods receipt processing time — gate-in to put-away. */
   grProcessingTimeDays: number;
+  /**
+   * Days a receipt sits in quality inspection before it counts as stock.
+   *
+   * Not a rounding detail. Material in QA has not entered available inventory,
+   * so a plan that counts it is optimistic by exactly this many days — and when
+   * a batch fails and moves to blocked, the quantity leaves the balance at once
+   * and every downstream bucket goes negative together.
+   */
+  qaQuarantineDays: number;
   safetyStock: number | null;
   safetyTimeDays: number;
   /** Assembly scrap, 0–1. */
@@ -90,6 +110,12 @@ export interface ItemPlant {
   maintainedStockDays: number | null;
   /** Maintained order coverage, in days. Its counterpart on the order side. */
   maintainedOrderDays: number | null;
+  /**
+   * The upper coverage norm, in days — the line above which stock reads as
+   * excess. Drawn on the projection chart opposite safety stock, because a
+   * planner defending a floor with no ceiling ends up defending it with cash.
+   */
+  maxNormDays: number | null;
   /** Days of production the campaign cycle imposes as a floor on stock days. */
   campaignCycleDays: number | null;
 }
@@ -100,8 +126,24 @@ export interface BomLine {
   componentItemId: string;
   /** Per 1 base UoM of parent. */
   qtyPer: number;
-  /** 0–1. */
+  /**
+   * Component scrap — a *material* property. 0–1, applied as × (1 + scrap).
+   *
+   * Three per cent of a laminate reel is lost to changeover and web waste
+   * whatever the line is doing. Kept separate from operation yield because the
+   * two behave differently and are argued about differently, and a planner
+   * disputing a requirement needs to know which of the two inflated it.
+   */
   componentScrapPct: number;
+  /**
+   * Operation yield — a *process* property. 0–1, applied as ÷ yield.
+   *
+   * A filling line delivers 97% of theoretical; a splitting stage delivers
+   * 89.7%. That is the process, not the material.
+   */
+  operationYieldPct: number;
+  /** What this step is, in the words a planner would use, for the explain panel. */
+  stepLabel: string | null;
   validFrom: string;
   validTo: string;
   /** '1' = primary. */
@@ -129,6 +171,25 @@ export interface Vendor {
   name: string;
   /** 0–1, derived from OTIF history. */
   reliabilityScore: number;
+  /**
+   * The vendor's own working calendar, which is not the plant's.
+   *
+   * A dispatch cannot be scheduled out of a day the vendor is closed any more
+   * than a receipt can be scheduled into a day the plant cannot receive on.
+   * Getting this wrong is the most common reason a technically correct schedule
+   * is rejected by the people who have to execute it.
+   */
+  calendarId: string;
+  /**
+   * Whole weeks, by Monday date, in which this vendor produces nothing —
+   * an annual maintenance shutdown, a statutory close-down.
+   *
+   * A production shutdown is not a dispatch shutdown: a vendor can still ship
+   * finished stock built ahead of it. The two are kept apart deliberately,
+   * because that distinction is the difference between a residual exposure a
+   * planner has to absorb and one they can close with a phone call.
+   */
+  productionShutdownWeeks: string[];
 }
 
 export interface ItemVendor {
@@ -157,6 +218,23 @@ export interface ItemVendor {
   /** Days in transit after dispatch, separate from the vendor's own lead time. */
   transitDays: number;
   /**
+   * Days from purchase-order release to vendor acknowledgement.
+   *
+   * The first of the four intervals a total lead time decomposes into, and the
+   * one nobody measures — time lost before the vendor has even been told.
+   * Sourcing owns it, not the vendor.
+   */
+  acknowledgementDays: number;
+  /** Customs and clearance days on top of transit. Zero on domestic lanes. */
+  customsDays: number;
+  /**
+   * Most this vendor can produce in one week, in base UoM. Ceilings each
+   * delivery in the constrained schedule. Null where no ceiling is recorded.
+   */
+  weeklyCapacity: number | null;
+  /** Working days that must separate two deliveries — stops uneconomic dribble. */
+  minGapDays: number;
+  /**
    * Soonest this vendor can dispatch, in days from the planning date.
    *
    * Where the first delivery line is required earlier than this, the line is
@@ -184,8 +262,33 @@ export interface ReceiptHistory {
   promisedOn: string;
   receivedOn: string;
   qty: number;
+  /** What the schedule line asked for, against which `qty` is the fill. */
+  orderedQty: number;
   /** receivedOn − orderedOn, in calendar days. */
   actualLeadTimeDays: number;
+
+  /**
+   * The four intervals a total lead time is actually made of.
+   *
+   * A twelve-day slip is not "the supplier was late". Split here, it is four
+   * separate slips with four different owners — sourcing, vendor, logistics,
+   * plant QC — and two of them are routinely GCPL's own. Storing the boundary
+   * dates rather than the durations means the decomposition is measured off the
+   * record instead of being asserted beside it.
+   */
+  acknowledgedOn: string | null;
+  dispatchedOn: string | null;
+  /** Quality release against the certificate of analysis — when it became stock. */
+  qaReleasedOn: string | null;
+  /**
+   * Why this receipt deviated, where a planner recorded one.
+   *
+   * A deviation with no reason is a number; a deviation with a reason is a
+   * pattern. It is also what lets a genuine one-off — a port strike, a vendor
+   * shutdown — be excluded from a lead-time calculation later without anyone
+   * quietly deleting inconvenient data.
+   */
+  reasonCode: string | null;
   /**
    * The delivery line this receipt reconciles to, or null when nothing matched.
    *

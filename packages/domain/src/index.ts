@@ -1,5 +1,6 @@
 export * from './master-data';
 export * from './transactional';
+export * from './supply-tier';
 export * from './snapshot';
 export * from './mutations';
 export * from './plan-result';
