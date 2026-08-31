@@ -64,7 +64,6 @@ export default function MaterialPage() {
   }
 
   const item = detail.data;
-  const shortfall = item.position.shortfall;
 
   return (
     <Shell>
@@ -82,7 +81,7 @@ export default function MaterialPage() {
         <span className='text-muted-foreground font-mono text-[13px]'>
           {item.itemId} · {item.plantId} · {item.itemType} · class {item.abcClass}
         </span>
-        <StatusPill stockoutDate={item.position.stockoutDate} shortfall={shortfall} />
+        <StatusPill stockoutDate={item.position.stockoutDate} />
       </header>
 
       <div className='grid grid-cols-12 gap-6'>
@@ -99,10 +98,10 @@ export default function MaterialPage() {
         <Metric label='Demand over horizon' value={formatNumber(item.position.demand)} uom={item.baseUom} />
         <Metric label='Stock on hand' value={formatNumber(item.stock.unrestricted)} uom={item.baseUom} />
         <Metric
-          label='Confirmed inbound'
+          label='Committed inbound'
           value={formatNumber(item.position.expectedInbound)}
           uom={item.baseUom}
-          note='Supplier has committed'
+          note={`plus ${formatNumber(item.position.plannedReceipts)} ${item.baseUom} the plan recommends`}
         />
         <Metric
           label='Value on hand'
@@ -123,17 +122,23 @@ function Shell({ children }: { children: React.ReactNode }) {
   return <div className='mx-auto max-w-[1600px] px-8 py-8'>{children}</div>;
 }
 
-function StatusPill({ stockoutDate, shortfall }: { stockoutDate: string | null; shortfall: number }) {
-  const critical = stockoutDate !== null;
+/**
+ * States the position in the same terms the chart plots it. The previous
+ * version read `stockoutDate` off the committed-only balance and announced
+ * "runs out 03 Sep · short 1,518" directly above a line that never drops below
+ * 123 — two true numbers telling a viewer two different stories.
+ */
+function StatusPill({ stockoutDate }: { stockoutDate: string | null }) {
+  if (stockoutDate === null) {
+    return (
+      <span className='bg-status-settled/12 text-status-settled rounded-full px-2.5 py-0.5 text-[12px] font-medium'>
+        Committed supply covers the horizon
+      </span>
+    );
+  }
   return (
-    <span
-      className={cn(
-        'rounded-full px-2.5 py-0.5 text-[12px] font-medium',
-        critical ? 'bg-status-critical/12 text-status-critical' : 'bg-status-settled/12 text-status-settled',
-      )}
-    >
-      {critical ? `Runs out ${formatDateFull(stockoutDate)}` : 'Covered across the horizon'}
-      {critical && shortfall < 0 ? ` · short ${formatNumber(Math.abs(shortfall))}` : ''}
+    <span className='bg-status-critical/12 text-status-critical rounded-full px-2.5 py-0.5 text-[12px] font-medium'>
+      Committed only to {formatDateFull(stockoutDate)}
     </span>
   );
 }
