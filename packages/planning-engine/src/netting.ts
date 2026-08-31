@@ -67,6 +67,15 @@ export interface NettingInput {
   projectedAvailable: Float64Array;
   /** Written in place by this pass — excludes receipts that cannot be ordered in time. */
   projectedAvailableFeasible: Float64Array;
+  /**
+   * The planning threshold per bucket, from the norms engine.
+   *
+   * A quantity per bucket rather than one figure, so a seasonal norm can vary
+   * across the horizon — the point of Act 2 is that a flat norm is 50 days of
+   * cover in April and 14 in July, and a netting walk holding one number cannot
+   * express that. Omitted, the maintained safety stock applies flat.
+   */
+  normByBucket?: Float64Array;
   /** Maintained or observed, resolved by the caller. */
   effectiveLeadTimeDays: number;
   moq: number;
@@ -99,8 +108,21 @@ export interface NettingResult {
   firstStockoutDay: number;
   /** Day of the first balance below the planning threshold, or −1. */
   firstBreachDay: number;
-  /** The threshold actually applied — safety stock or reorder point. */
+  /** The threshold actually applied on day 0 — safety stock or reorder point. */
   threshold: number;
+  /**
+   * The net requirement raised in each bucket, before any lot sizing.
+   *
+   * This is what the scheduling engine consumes. Quantity and delivery split
+   * are one decision, not two: with a minimum order quantity, a shipment cap, a
+   * storage ceiling and a receiving rate all in play, sizing the order here and
+   * slicing it later produces splits that satisfy one constraint by violating
+   * another. Netting says how short the position runs and when; scheduling
+   * decides what to do about it.
+   */
+  netRequirements: Float64Array;
+  /** First bucket the position runs below its norm, or −1. Where line 1 is needed. */
+  firstUncoveredDay: number;
 }
 
 /** Items with no planning type, or explicitly excluded, are not netted. */
@@ -125,7 +147,10 @@ export function netItemPlant(input: NettingInput): NettingResult {
   } = input;
 
   const safetyStock = itemPlant.safetyStock ?? 0;
-  const threshold = itemPlant.mrpType === 'VB' ? (itemPlant.reorderPoint ?? safetyStock) : safetyStock;
+  const flatThreshold = itemPlant.mrpType === 'VB' ? (itemPlant.reorderPoint ?? safetyStock) : safetyStock;
+  const normByBucket = input.normByBucket;
+  const thresholdAt = (day: number): number =>
+    normByBucket ? (normByBucket[day] ?? flatThreshold) : flatThreshold;
   const planningActive = isPlanningActive(itemPlant);
 
   const totalOffset = input.effectiveLeadTimeDays + itemPlant.grProcessingTimeDays + itemPlant.safetyTimeDays;
@@ -135,6 +160,7 @@ export function netItemPlant(input: NettingInput): NettingResult {
   const superseded: SupersededRequirement[] = [];
   let firstStockoutDay = -1;
   let firstBreachDay = -1;
+  const netRequirements = new Float64Array(horizonDays + 1);
   let balance = openingStock;
   // The same walk, minus any receipt whose release date has already passed.
   let feasibleBalance = openingStock;
@@ -149,7 +175,10 @@ export function netItemPlant(input: NettingInput): NettingResult {
       (infeasibleReceipts[day] as number) -
       (grossRequirements[day] as number);
 
+    const threshold = thresholdAt(day);
     if (firstBreachDay === -1 && balance < threshold - EPSILON) firstBreachDay = day;
+
+    if (balance < threshold - EPSILON) netRequirements[day] = threshold - balance;
 
     if (planningActive && balance < threshold - EPSILON && orders.length < MAX_ORDERS_PER_ITEM_PLANT) {
       const netRequirement = threshold - balance;
@@ -241,7 +270,15 @@ export function netItemPlant(input: NettingInput): NettingResult {
     if (firstStockoutDay === -1 && feasibleBalance < -1e-6) firstStockoutDay = day;
   }
 
-  return { orders, superseded, firstStockoutDay, firstBreachDay, threshold };
+  return {
+    orders,
+    superseded,
+    firstStockoutDay,
+    firstBreachDay,
+    threshold: thresholdAt(0),
+    netRequirements,
+    firstUncoveredDay: firstBreachDay,
+  };
 }
 
 /**

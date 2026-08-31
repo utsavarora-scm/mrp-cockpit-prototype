@@ -23,3 +23,43 @@ export {
   OBSERVATION_WINDOW,
   type ObservedLeadTime,
 } from './observed';
+export {
+  runAdherence,
+  type AdherenceInput,
+  type AdherenceResult,
+  type AdherenceStats,
+  type MatchedReceipt,
+  type MatchMethod,
+  type UnmatchedReceipt,
+} from './adherence';
+export {
+  reconstructLeadTime,
+  reconstructWithFallback,
+  computeNorm,
+  seasonalityIndex,
+  isSeasonal,
+  normCurve,
+  flatNormCoverageByPeriod,
+  MIN_RECEIPTS_FOR_RECOMMENDATION,
+  SEASONALITY_BAND,
+  type LeadTimeObservation,
+  type LeadTimeDistribution,
+  type NormBasis,
+  type NormConstraint,
+  type NormConstraintKind,
+  type NormInput,
+  type NormRecommendation,
+  type NormCurvePoint,
+  type ReconstructOptions,
+} from './norms';
+export {
+  scheduleOrder,
+  allocateAcrossVendors,
+  MAX_UNLOAD_DAYS,
+  type SchedulingInput,
+  type OrderSchedule,
+  type ScheduledLine,
+  type LineCountDriver,
+  type LineCountDriverKind,
+  type LineFlag,
+} from './scheduling';

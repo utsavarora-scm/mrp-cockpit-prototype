@@ -716,6 +716,17 @@ function buildItemPlants(
     row.maintainedOrderDays = PACKAGING_DRIFT.maintainedStockDays;
     row.leadTimeDays = PACKAGING_DRIFT.maintainedStockDays;
     row.paramsLastChangedOn = '2023-11-02';
+
+    // The buffer has to *be* the 45 days the policy claims, or the scenario
+    // says one thing and the data says another. Left on the general naive
+    // sizing, these rows carried a 45-day stock-days norm alongside about two
+    // days of actual safety stock — and the engine, reading the safety stock,
+    // reported them as under-buffered. That is the exact opposite of the
+    // finding, and it would have emptied the cockpit's excess-capital hero.
+    const used = consumption.get(key);
+    if (used && used.mean > 0) {
+      row.safetyStock = Math.round(PACKAGING_DRIFT.maintainedStockDays * used.mean);
+    }
     PACKAGING_DRIFT_KEYS.add(key);
   }
 
