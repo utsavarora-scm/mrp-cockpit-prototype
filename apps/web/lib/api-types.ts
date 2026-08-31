@@ -43,12 +43,59 @@ export interface PlantOption {
   type: 'OWN' | 'COPACKER';
 }
 
+/**
+ * One segment of the gap-attribution bar.
+ *
+ * The cockpit's second question, after "how big is it": *what kind of problem
+ * is it?* Money that needs a purchase order raising is a different job from
+ * money already ordered and arriving late, which is different again from stock
+ * that exists but is at the wrong plant.
+ */
+export interface GapSegment {
+  kind: 'NEEDS_PO' | 'ARRIVING_LATE' | 'WRONG_PLANT';
+  label: string;
+  value: number;
+  /** 0–1 of the total gap. */
+  share: number;
+  materials: number;
+}
+
+/** One row of the cockpit's needs-attention list, ranked by money at stake. */
+export interface AttentionRow {
+  itemId: string;
+  plantId: string;
+  description: string;
+  baseUom: string;
+  /** Plain language, no jargon and no exception codes. */
+  issue: string;
+  /** Days until the position actually bites. Null when it already has. */
+  daysToImpact: number | null;
+  valueAtStake: number;
+  /** What a planner would do next, in one line. */
+  nextStep: string;
+}
+
+/** The norms half of the cockpit — the 0:00 beat. */
+export interface NormsSummary {
+  excessCapital: number;
+  unprotectedExposure: number;
+  materialsWithRecommendation: number;
+  materialsInExcess: number;
+  materialsBelowNorm: number;
+  /** Total demand covered by the maintained norms, 0–1. */
+  coverageAgainstNorm: number;
+  elapsedMs: number;
+}
+
 export interface CockpitSummary {
   scenarioId: string;
   planningDate: string;
   horizonDays: number;
   /** Plants in the active pack, for the top-bar filter. */
   plants: PlantOption[];
+  norms: NormsSummary;
+  gapAttribution: GapSegment[];
+  needsAttention: AttentionRow[];
   /** Wall-clock milliseconds of the run behind this summary. */
   elapsedMs: number;
   planningPosition: PlanningPosition;
@@ -248,6 +295,121 @@ export interface VendorSplit {
   isImport: boolean;
 }
 
+/** One constraint that shaped a norm or a delivery split. */
+export interface ConstraintView {
+  kind: string;
+  label: string;
+  binding: boolean;
+  value: string;
+  note: string;
+}
+
+/** One row of the Norm Review table, with everything its expansion needs. */
+export interface NormRow {
+  itemId: string;
+  plantId: string;
+  description: string;
+  baseUom: string;
+  abcClass: string;
+  vendorId: string | null;
+  vendorName: string | null;
+  isImport: boolean;
+  paramsLastChangedOn: string;
+
+  maintainedOrderDays: number | null;
+  recommendedOrderDays: number;
+  maintainedStockDays: number | null;
+  recommendedStockDays: number;
+  /** recommended − maintained, in stock days. */
+  stockDaysGap: number | null;
+
+  maintainedQty: number | null;
+  recommendedQty: number;
+  /** Positive = excess capital, negative = unprotected exposure. */
+  valueImpact: number;
+  direction: 'EXCESS' | 'EXPOSURE';
+  confidence: 'HIGH' | 'LOW';
+
+  /** The working, for the row expansion. */
+  calculation: {
+    z: number;
+    serviceLevel: number;
+    dailyDemandMean: number;
+    dailyDemandStdDev: number;
+    leadTimeMean: number;
+    leadTimeStdDev: number;
+    demandTerm: number;
+    leadTimeTerm: number;
+    leadTimeShare: number;
+    naiveQty: number;
+    combinedQty: number;
+    ratio: number;
+  };
+  constraints: ConstraintView[];
+  /** Observed lead times, for the histogram. */
+  observations: number[];
+  receipts: LeadTimeReceipt[];
+  unmatchedCount: number;
+}
+
+export interface NormsQueryResult {
+  rows: NormRow[];
+  total: number;
+  excessCapital: number;
+  unprotectedExposure: number;
+  elapsedMs: number;
+  vendors: Array<{ id: string; name: string }>;
+}
+
+/** One delivery line of a generated schedule. */
+export interface ScheduleLineView {
+  line: number;
+  qty: number;
+  requiredByDate: string;
+  requestedDispatchDate: string;
+  coverDays: number;
+  /** 0–1, from the vendor's own delivery history. */
+  confidence: number;
+  flags: string[];
+  /** Days the line is needed before the vendor can physically dispatch it. */
+  infeasibleByDays: number;
+  status: 'PLANNED' | 'CONFIRMED' | 'IN_TRANSIT' | 'RECEIVED' | 'DELAYED';
+}
+
+/** A generated purchase schedule, with the constraints that produced it. */
+export interface ScheduleView {
+  orderId: string;
+  /** True when this is an order the plan is recommending, not one placed. */
+  isPlanned: boolean;
+  itemId: string;
+  plantId: string;
+  description: string;
+  baseUom: string;
+  vendorId: string | null;
+  vendorName: string | null;
+  isImport: boolean;
+  planningDate: string;
+  totalQty: number;
+  /** Where the total came from — shown so the quantity is never just asserted. */
+  derivation: {
+    orderWindowDays: number;
+    demandInWindow: number;
+    targetClosing: number;
+    openingStock: number;
+    committedInWindow: number;
+    derivedTotal: number;
+    isOverridden: boolean;
+  };
+  lineCount: number;
+  lines: ScheduleLineView[];
+  constraints: ConstraintView[];
+  rationale: string;
+  peakOnHand: number;
+  storageCapacity: number | null;
+  infeasibleLines: number;
+  horizonEndDate: string;
+}
+
 /** The planning position for one material, for the detail header. */
 export interface ItemPosition {
   demand: number;
@@ -306,6 +468,10 @@ export interface ItemDetail {
   parameters: ParameterHealth[];
   leadTime: LeadTimeEvidence;
   vendors: VendorSplit[];
+  /** Null where there is not enough receipt history to carry a recommendation. */
+  norm: NormRow | null;
+  /** The order the plan recommends, as a schedule. Null when it recommends none. */
+  plannedOrderId: string | null;
   healthScore: number;
   position: ItemPosition;
   purchaseOrders: PurchaseOrderView[];

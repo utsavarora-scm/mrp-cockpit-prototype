@@ -19,6 +19,7 @@ export {
 export {
   summariseObservedLeadTimes,
   demandStdDev,
+  dailyDemandStdDev,
   reviewPeriodDays,
   OBSERVATION_WINDOW,
   type ObservedLeadTime,

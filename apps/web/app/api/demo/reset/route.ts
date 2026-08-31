@@ -8,6 +8,7 @@
 
 import { NextResponse } from 'next/server';
 
+import { clearNormsCache } from '@/lib/server/norms';
 import { resetDemo } from '@/lib/server/planning-session';
 import { cockpitSummary } from '@/lib/server/projections';
 
@@ -16,6 +17,7 @@ export const dynamic = 'force-dynamic';
 export async function POST() {
   const startedAt = performance.now();
   resetDemo();
+  clearNormsCache();
   const summary = cockpitSummary('baseline');
   return NextResponse.json({ ...summary, resetMs: Math.round(performance.now() - startedAt) });
 }

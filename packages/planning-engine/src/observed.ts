@@ -85,6 +85,38 @@ export function reviewPeriodDays(leadTimeDays: number | null): number {
  * predictable. Measuring the raw series makes almost every parameter in a normal
  * catalogue look misaligned, which is a detector that cries wolf.
  */
+/**
+ * Standard deviation of daily demand, unsmoothed.
+ *
+ * This is the σ_D the safety-stock formula means, and it is deliberately a
+ * different function from `demandStdDev` below rather than a flag on it.
+ * Smoothing over a seven-day window measures the spread of the *moving
+ * average*, which is smaller than the spread of daily demand by roughly √7 —
+ * on the hero material, 3.2 against 9.0. Feed the smoothed figure to the norm
+ * and the buffer comes out understated and the naive-versus-combined ratio
+ * comes out at 21× instead of 7.6×: both wrong, and neither obviously so.
+ *
+ * Population, matching every other spread in the product.
+ */
+export function dailyDemandStdDev(demand: Float64Array): number {
+  const n = demand.length;
+  if (n === 0) return 0;
+  let total = 0;
+  for (let i = 0; i < n; i += 1) total += demand[i] as number;
+  const mean = total / n;
+  let variance = 0;
+  for (let i = 0; i < n; i += 1) variance += ((demand[i] as number) - mean) ** 2;
+  return Math.sqrt(variance / n);
+}
+
+/**
+ * Standard deviation of *smoothed* demand.
+ *
+ * Kept for the parameter-health comparison, which is asking whether a
+ * maintained safety stock is in the right region given lumpy dependent demand
+ * — a question where smoothing out campaign spikes is the right thing to do.
+ * Not for sizing a norm: see `dailyDemandStdDev`.
+ */
 export function demandStdDev(grossRequirements: Float64Array, smoothingDays = 7): number {
   const n = grossRequirements.length;
   if (n === 0) return 0;

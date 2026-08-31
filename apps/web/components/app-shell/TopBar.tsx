@@ -38,8 +38,9 @@ const TABS = [
   {
     href: '/item',
     label: 'Materials',
-    match: (path: string) => path.startsWith('/item') || path.startsWith('/material'),
+    match: (path: string) => path.startsWith('/item') || path.startsWith('/material') || path.startsWith('/supply'),
   },
+  { href: '/norms', label: 'Norms', match: (path: string) => path.startsWith('/norms') },
 ];
 
 export function TopBar() {

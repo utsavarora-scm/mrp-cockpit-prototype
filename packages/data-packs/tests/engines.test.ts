@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   computeNorm,
+  dailyDemandStdDev,
   demandStdDev,
   reconstructLeadTime,
   runAdherence,
@@ -123,6 +124,50 @@ describe('Brief A.1, reconstructed end to end from the pack', () => {
     expect(itemPlant.safetyStock).toBeCloseTo(norm.naiveSafetyStockQty, 0);
   });
 
+  it('measures the daily demand spread the appendix uses, not a smoothed one', () => {
+    // The app computes sigma_D from the demand series rather than from a
+    // constant, so the series has to *be* 42 +/- 9. Smoothing it over a week
+    // gives 3.2 instead, which quietly turns the 7.6x into 21x — both numbers
+    // computed, only one of them right.
+    const itemPlan = plan.plans.get(planKey(HERO.itemId, HERO.plantId))!;
+    let total = 0;
+    for (const value of itemPlan.underlyingDemand) total += value;
+    const mean = total / itemPlan.underlyingDemand.length;
+
+    expect(mean).toBeCloseTo(HERO.dailyDemandMean, 1);
+    expect(dailyDemandStdDev(itemPlan.underlyingDemand)).toBeCloseTo(HERO.dailyDemandStdDev, 1);
+    expect(demandStdDev(itemPlan.underlyingDemand)).toBeLessThan(5);
+  });
+
+  it('reproduces the ratio from the series rather than from the spec constants', () => {
+    const itemPlan = plan.plans.get(planKey(HERO.itemId, HERO.plantId))!;
+    let total = 0;
+    for (const value of itemPlan.underlyingDemand) total += value;
+
+    const fromSeries = computeNorm({
+      itemId: HERO.itemId,
+      plantId: HERO.plantId,
+      serviceLevel: itemPlant.serviceLevelTarget,
+      dailyDemandMean: total / itemPlan.underlyingDemand.length,
+      dailyDemandStdDev: dailyDemandStdDev(itemPlan.underlyingDemand),
+      leadTime,
+      goodsReceiptProcessingDays: itemPlant.grProcessingTimeDays,
+      standardCost: item.standardCost,
+      maintainedStockDays: itemPlant.maintainedStockDays,
+      maintainedStockQty: itemPlant.safetyStock,
+      campaignCycleDays: itemPlant.campaignCycleDays,
+      moq: vendor.moq,
+      shelfLifeDays: item.shelfLifeDays,
+      storageCapacity: itemPlant.storageCapacity,
+    });
+
+    // What the screen actually renders: 121 against 913, 7.6x apart.
+    expect(fromSeries.naiveSafetyStockQty).toBeCloseTo(121, 0);
+    expect(fromSeries.safetyStockQty).toBeCloseTo(913, 0);
+    expect(fromSeries.ratioToNaive).toBeGreaterThan(7.4);
+    expect(fromSeries.ratioToNaive).toBeLessThan(7.8);
+  });
+
   it('names the receipts it was reconstructed from', () => {
     expect(leadTime.sample).toHaveLength(14);
     for (const observation of leadTime.sample) {
@@ -164,7 +209,7 @@ describe('norms across the category', () => {
           plantId: itemPlant.plantId,
           serviceLevel: itemPlant.serviceLevelTarget,
           dailyDemandMean: dailyMean,
-          dailyDemandStdDev: demandStdDev(itemPlan.underlyingDemand),
+          dailyDemandStdDev: dailyDemandStdDev(itemPlan.underlyingDemand),
           leadTime,
           goodsReceiptProcessingDays: itemPlant.grProcessingTimeDays,
           standardCost: item.standardCost,

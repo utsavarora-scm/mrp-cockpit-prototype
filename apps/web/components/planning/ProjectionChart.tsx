@@ -109,7 +109,13 @@ export function ProjectionChart({ detail }: { detail: ItemDetail }) {
   const points = toPoints(detail, weeks);
   const barSize = barSizeFor(weeks);
 
-  const peak = points.reduce((max, point) => Math.max(max, point.balance), detail.safetyStock);
+  // The recommended norm, drawn against the maintained one. This is the whole
+  // Act 1 argument in a single pair of lines: the plan tracking a buffer of 121
+  // while the material's own lead-time history says it needs 913. Neither
+  // number is annotated onto the chart — both are computed.
+  const recommendedNorm = detail.norm?.recommendedQty ?? null;
+
+  const peak = points.reduce((max, point) => Math.max(max, point.balance), recommendedNorm ?? detail.safetyStock);
   const trough = points.reduce((min, point) => Math.min(min, point.balance), 0);
   const flowPeak = points.reduce(
     (max, point) => Math.max(max, point.confirmedIn + point.unconfirmedIn + point.plannedIn, -point.consumption),
@@ -151,8 +157,20 @@ export function ProjectionChart({ detail }: { detail: ItemDetail }) {
       </header>
 
       {/* The one sentence that reconciles the header's warning with this chart. */}
-      <p className='mt-3 mb-4 max-w-[62ch] text-[13px] leading-relaxed'>
-        {markCover ? (
+      <p className='mt-3 mb-4 max-w-[68ch] text-[13px] leading-relaxed'>
+        {recommendedNorm !== null && recommendedNorm > detail.safetyStock * 1.5 ? (
+          <>
+            The plan is tracking a buffer of{' '}
+            <span className='text-status-attention font-medium'>
+              {formatNumber(detail.safetyStock)} {detail.baseUom}
+            </span>
+            . This material&rsquo;s own delivery history says it needs{' '}
+            <span className='text-status-critical font-medium'>
+              {formatNumber(recommendedNorm)} {detail.baseUom}
+            </span>{' '}
+            — {detail.norm?.calculation.ratio.toFixed(1)} times more, almost all of it because the lead time moves.
+          </>
+        ) : markCover ? (
           <>
             Committed supply covers this material to{' '}
             <span className='text-status-critical font-medium'>{formatDateFull(stockoutDate as string)}</span>. The line
@@ -215,12 +233,26 @@ export function ProjectionChart({ detail }: { detail: ItemDetail }) {
               stroke='var(--status-attention)'
               strokeDasharray='4 3'
               label={{
-                value: `Norm ${formatNumber(detail.safetyStock)}`,
-                position: 'insideTopRight',
+                value: `Maintained norm ${formatNumber(detail.safetyStock)}`,
+                position: 'insideBottomRight',
                 fontSize: 11,
                 fill: 'var(--status-attention)',
               }}
             />
+            {recommendedNorm !== null && Math.abs(recommendedNorm - detail.safetyStock) > 1 ? (
+              <ReferenceLine
+                y={recommendedNorm}
+                stroke='var(--status-critical)'
+                strokeDasharray='6 3'
+                strokeWidth={1.5}
+                label={{
+                  value: `Recommended ${formatNumber(recommendedNorm)}`,
+                  position: 'insideTopRight',
+                  fontSize: 11,
+                  fill: 'var(--status-critical)',
+                }}
+              />
+            ) : null}
             {trough < 0 ? <ReferenceLine y={0} stroke='var(--foreground)' strokeWidth={1} /> : null}
             {markCover ? (
               <ReferenceLine

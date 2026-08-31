@@ -17,6 +17,8 @@
  */
 
 import { formatCurrency, formatDateFull, formatNumber, formatPercent } from '@repo/domain';
+import { cn } from '@repo/ui/lib/utils';
+import Link from 'next/link';
 
 import type { ItemDetail } from '@/lib/api-types';
 import { OverrideModal } from '@/components/planning/OverrideModal';
@@ -83,13 +85,44 @@ export function NormRail({ detail }: { detail: ItemDetail }) {
         </div>
       ) : null}
 
-      <div className='border-t pt-4'>
-        <p className='text-muted-foreground text-[12px] leading-relaxed'>
-          <span className='text-foreground font-medium'>Recommended norm — not yet computed.</span> Reconstructing it
-          from this material’s own goods receipts is the norms engine’s job, and it lands in the next checkpoint. The
-          gap between the two, priced, is what the cockpit will lead with.
-        </p>
-      </div>
+      {detail.norm ? (
+        <div className='border-t pt-4'>
+          <p className='text-muted-foreground text-[12px] font-medium'>Recommended buffer</p>
+          <p
+            className={cn(
+              'mt-1 text-[22px] font-semibold tabular-nums',
+              detail.norm.direction === 'EXCESS' ? 'text-status-attention' : 'text-status-critical',
+            )}
+          >
+            {formatNumber(detail.norm.recommendedQty)} {detail.baseUom}
+          </p>
+          <p className='text-muted-foreground mt-0.5 text-[12px]'>
+            {detail.norm.recommendedStockDays.toFixed(1)} days of cover — {detail.norm.calculation.ratio.toFixed(1)}×
+            what the maintained buffer provides
+          </p>
+          <p className='mt-2 text-[13px]'>
+            <span className={detail.norm.direction === 'EXCESS' ? 'text-status-attention' : 'text-status-critical'}>
+              {formatCurrency(Math.abs(detail.norm.valueImpact))}
+            </span>{' '}
+            <span className='text-muted-foreground'>
+              {detail.norm.direction === 'EXCESS' ? 'of capital tied up' : 'of exposure'}
+            </span>
+          </p>
+          <Link
+            href={`/norms?filter=${detail.norm.direction === 'EXCESS' ? 'excess' : 'exposure'}`}
+            className='text-primary mt-2 inline-block text-[12px] font-medium hover:underline'
+          >
+            Review norms →
+          </Link>
+        </div>
+      ) : (
+        <div className='border-t pt-4'>
+          <p className='text-muted-foreground text-[12px] leading-relaxed'>
+            <span className='text-foreground font-medium'>No recommendation.</span> Fewer than six matched receipts —
+            not enough history to reconstruct a lead time worth arguing from.
+          </p>
+        </div>
+      )}
 
       <p className='text-muted-foreground text-[12px]'>
         Parameters last maintained{' '}

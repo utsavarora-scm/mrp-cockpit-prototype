@@ -118,7 +118,17 @@ export default function MaterialPage() {
               .
             </p>
           </div>
-          <ExplainDrawer detail={item} explain={item.recommendation} />
+          <div className='flex items-center gap-2'>
+            {item.plannedOrderId ? (
+              <Link
+                href={`/supply/${encodeURIComponent(item.plannedOrderId)}`}
+                className='border-input hover:bg-muted inline-flex h-8 items-center rounded-md border px-3 text-[13px] font-medium transition-colors'
+              >
+                See the delivery schedule
+              </Link>
+            ) : null}
+            <ExplainDrawer detail={item} explain={item.recommendation} />
+          </div>
         </section>
       ) : null}
 

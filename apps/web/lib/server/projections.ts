@@ -30,7 +30,11 @@ import type {
   LeadTimeEvidence,
   MaterialRow,
   MaterialsQueryResult,
+  AttentionRow,
+  GapSegment,
   MrpExplain,
+  NormRow,
+  NormsSummary,
   OverridePreview,
   ParameterHealth,
   PlanningPosition,
@@ -39,6 +43,9 @@ import type {
   TimePhasedRow,
   VendorSplit,
 } from '../api-types';
+import { normRows } from './norm-rows';
+import { categoryNorms } from './norms';
+import { plannedOrderId } from './supply-schedule';
 import { dataPack, planFor, planWithParamOverride, snapshotFor } from './planning-session';
 
 /** Opening stock above this many times the horizon's own demand reads as excess. */
@@ -80,9 +87,228 @@ export function cockpitSummary(scenarioId: string): CockpitSummary {
     planningDate: pack.planningDate,
     horizonDays: pack.horizonDays,
     plants,
+    norms: normsSummary(scenarioId),
+    gapAttribution: gapAttribution(scenarioId),
+    needsAttention: needsAttention(scenarioId),
     elapsedMs: plan.elapsedMs,
     planningPosition: planningPosition(scenarioId),
   };
+}
+
+/** The excess ↔ exposure pair the cockpit leads with. */
+function normsSummary(scenarioId: string): NormsSummary {
+  const norms = categoryNorms(scenarioId);
+  const position = planningPosition(scenarioId);
+  return {
+    excessCapital: norms.excessCapital,
+    unprotectedExposure: norms.unprotectedExposure,
+    materialsWithRecommendation: norms.recommendations.size,
+    materialsInExcess: norms.materialsInExcess,
+    materialsBelowNorm: norms.materialsBelowNorm,
+    coverageAgainstNorm: position.coverage.inventory,
+    elapsedMs: norms.elapsedMs,
+  };
+}
+
+/**
+ * How short the position is *at the moment it first goes short*.
+ *
+ * Deliberately not the worst balance across the horizon. On a material whose
+ * replenishment cannot arrive for seven weeks, the horizon-worst balance is a
+ * deficit compounded over six months of demand with no orders placed — it says
+ * "if we never buy this again", which is true, useless, and an order of
+ * magnitude larger than anything a planner is actually deciding about. The
+ * hero material's horizon-worst is 1,518 MT; the shortfall on the day it
+ * actually bites is 263. The second number is the one someone has to solve.
+ */
+function shortfallAtFirstBreach(itemPlan: {
+  projectedAvailableFeasible: Float64Array;
+  safetyStock: number;
+}): { shortfall: number; day: number } {
+  const horizon = itemPlan.projectedAvailableFeasible.length - 1;
+  for (let day = 0; day <= horizon; day += 1) {
+    const balance = itemPlan.projectedAvailableFeasible[day] as number;
+    if (balance < itemPlan.safetyStock) return { shortfall: itemPlan.safetyStock - balance, day };
+  }
+  return { shortfall: 0, day: -1 };
+}
+
+/**
+ * What kind of problem the gap is, in three buckets.
+ *
+ * Deliberately about the *action* each slice needs rather than about severity.
+ * "₹2.4 Cr needs a purchase order raising" tells a planner what to do this
+ * morning; "₹2.4 Cr critical" does not.
+ */
+function gapAttribution(scenarioId: string): GapSegment[] {
+  const plan = planFor(scenarioId);
+  const snapshot = snapshotFor();
+  const items = new Map(snapshot.items.map((item) => [item.id, item]));
+
+  // Where each item is short, and where it is long, so a shortage at one plant
+  // can be recognised as stock sitting at another rather than a buying problem.
+  const shortByItem = new Map<string, Array<{ plantId: string; qty: number }>>();
+  const longByItem = new Map<string, number>();
+
+  for (const [key, itemPlan] of plan.plans) {
+    const [itemId, plantId] = key.split('@') as [string, string];
+    const { shortfall } = shortfallAtFirstBreach(itemPlan);
+    if (shortfall > 0) {
+      const bucket = shortByItem.get(itemId) ?? [];
+      bucket.push({ plantId, qty: shortfall });
+      shortByItem.set(itemId, bucket);
+    } else {
+      const horizon = itemPlan.projectedAvailableFeasible.length - 1;
+      const closing = itemPlan.projectedAvailableFeasible[horizon] as number;
+      longByItem.set(itemId, (longByItem.get(itemId) ?? 0) + Math.max(0, closing - itemPlan.safetyStock));
+    }
+  }
+
+  // Supply already placed but arriving after the plan needs it.
+  const lateByKey = new Map<string, number>();
+  for (const element of snapshot.supply) {
+    for (const line of element.schedule ?? []) {
+      const slipped =
+        line.status === 'DELAYED' ||
+        (line.confirmedDate !== null && line.confirmedDate > line.plannedDate) ||
+        line.expectedDate > line.plannedDate;
+      if (!slipped) continue;
+      const key = planKey(element.itemId, element.plantId);
+      lateByKey.set(key, (lateByKey.get(key) ?? 0) + line.qty);
+    }
+  }
+
+  let needsPo = 0;
+  let needsPoCount = 0;
+  let late = 0;
+  let lateCount = 0;
+  let wrongPlant = 0;
+  let wrongPlantCount = 0;
+
+  for (const [itemId, shortages] of shortByItem) {
+    const cost = items.get(itemId)?.standardCost ?? 0;
+    let elsewhere = longByItem.get(itemId) ?? 0;
+
+    for (const shortage of shortages) {
+      const key = planKey(itemId, shortage.plantId);
+      const lateQty = Math.min(lateByKey.get(key) ?? 0, shortage.qty);
+      let remaining = shortage.qty - lateQty;
+
+      if (lateQty > 0) {
+        late += lateQty * cost;
+        lateCount += 1;
+      }
+
+      // Stock that exists, at the wrong plant. Counted once — the surplus can
+      // only cover one shortage.
+      const transferable = Math.min(remaining, elsewhere);
+      if (transferable > 0) {
+        wrongPlant += transferable * cost;
+        wrongPlantCount += 1;
+        elsewhere -= transferable;
+        remaining -= transferable;
+      }
+
+      if (remaining > 0) {
+        needsPo += remaining * cost;
+        needsPoCount += 1;
+      }
+    }
+  }
+
+  const total = needsPo + late + wrongPlant;
+  const share = (value: number): number => (total === 0 ? 0 : value / total);
+
+  return [
+    { kind: 'NEEDS_PO', label: 'Needs an order raising', value: needsPo, share: share(needsPo), materials: needsPoCount },
+    { kind: 'ARRIVING_LATE', label: 'Ordered, arriving late', value: late, share: share(late), materials: lateCount },
+    {
+      kind: 'WRONG_PLANT',
+      label: 'In stock at another plant',
+      value: wrongPlant,
+      share: share(wrongPlant),
+      materials: wrongPlantCount,
+    },
+  ];
+}
+
+/**
+ * The six materials with the most money at stake, in plain language.
+ *
+ * Ranked by rupees and nothing else. The previous build ranked by an exception
+ * severity that was itself derived from rupees, which added a vocabulary the
+ * client would have had to learn in order to read a list they could already
+ * read.
+ */
+function needsAttention(scenarioId: string): AttentionRow[] {
+  const plan = planFor(scenarioId);
+  const snapshot = snapshotFor();
+  const norms = categoryNorms(scenarioId);
+  const items = new Map(snapshot.items.map((item) => [item.id, item]));
+  const planningEpochDay = toEpochDay(plan.planningDate);
+
+  const rows: AttentionRow[] = [];
+
+  for (const [key, itemPlan] of plan.plans) {
+    const [itemId, plantId] = key.split('@') as [string, string];
+    const item = items.get(itemId);
+    if (!item) continue;
+
+    const horizon = itemPlan.projectedAvailableFeasible.length - 1;
+    let stockoutDay = -1;
+    for (let day = 0; day <= horizon; day += 1) {
+      if ((itemPlan.projectedAvailableFeasible[day] as number) < 0) {
+        stockoutDay = day;
+        break;
+      }
+    }
+
+    const recommendation = norms.recommendations.get(key);
+    const { shortfall, day: breachDay } = shortfallAtFirstBreach(itemPlan);
+    const normGap = recommendation
+      ? Math.max(recommendation.excessCapital, recommendation.unprotectedExposure)
+      : 0;
+    const valueAtStake = Math.max(shortfall * item.standardCost, normGap);
+    if (valueAtStake <= 0) continue;
+
+    const daysToImpact = stockoutDay >= 0 ? stockoutDay : breachDay >= 0 ? breachDay : null;
+
+    let issue: string;
+    let nextStep: string;
+    if (recommendation && recommendation.excessCapital > shortfall * item.standardCost) {
+      const days = recommendation.constrainedStockDays;
+      issue = `Holding ${Math.round(recommendation.maintainedStockQty ?? 0).toLocaleString('en-IN')} ${item.baseUom} against a need of ${Math.round(recommendation.constrainedStockQty).toLocaleString('en-IN')} — the norm has not moved since ${formatDateShortSafe(snapshot, itemId, plantId)}.`;
+      nextStep = `Cut the norm to ${days.toFixed(0)} days and release the capital.`;
+    } else if (stockoutDay >= 0) {
+      issue = `Runs out on ${fromEpochDay(planningEpochDay + stockoutDay)} with nothing confirmed to cover it.`;
+      nextStep = 'Place the recommended order, or pull an existing delivery forward.';
+    } else if (recommendation && recommendation.unprotectedExposure > 0) {
+      issue = `Buffered at ${Math.round(recommendation.maintainedStockQty ?? 0).toLocaleString('en-IN')} ${item.baseUom} where the lead time swings by ${recommendation.leadTime.stdDev.toFixed(0)} days — it needs ${Math.round(recommendation.constrainedStockQty).toLocaleString('en-IN')}.`;
+      nextStep = `Raise the norm to ${recommendation.constrainedStockDays.toFixed(0)} days of cover.`;
+    } else {
+      issue = 'Drops below its buffer inside the horizon.';
+      nextStep = 'Review the coverage and bring supply forward.';
+    }
+
+    rows.push({
+      itemId,
+      plantId,
+      description: item.description,
+      baseUom: item.baseUom,
+      issue,
+      daysToImpact,
+      valueAtStake,
+      nextStep,
+    });
+  }
+
+  return rows.sort((a, b) => b.valueAtStake - a.valueAtStake).slice(0, 6);
+}
+
+/** The date this item-plant's parameters were last touched. */
+function formatDateShortSafe(snapshot: PlanningSnapshot, itemId: string, plantId: string): string {
+  const master = snapshot.itemPlants.find((row) => row.itemId === itemId && row.plantId === plantId);
+  return master?.paramsLastChangedOn ?? 'it was set';
 }
 
 export function planningPosition(scenarioId: string): PlanningPosition {
@@ -416,6 +642,11 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
     parameters: parameterHealth(master, item, itemPlan, snapshot),
     leadTime: leadTimeEvidence(snapshot, master, itemId, plantId),
     vendors: vendorSplit(snapshot, itemId, plantId),
+    norm: normRowFor(itemId, plantId),
+    plannedOrderId:
+      itemPlan.plannedReceipts.some((qty) => qty > 0) || itemPlan.projectedAvailableFeasible.some((b) => b < itemPlan.safetyStock)
+        ? plannedOrderId(itemId, plantId)
+        : null,
     healthScore: healthScoreFor(master, snapshot, itemId, plantId),
     position: itemPosition(itemPlan, snapshot, itemId, plantId, planningEpochDay),
     purchaseOrders: purchaseOrders(snapshot, itemId, plantId),
@@ -646,6 +877,14 @@ function observedLeadTimeFor(snapshot: PlanningSnapshot, itemId: string, plantId
   let total = 0;
   for (const receipt of matched) total += receipt.actualLeadTimeDays;
   return total / matched.length;
+}
+
+/** This material's own row from the Norm Review projection, or null. */
+function normRowFor(itemId: string, plantId: string): NormRow | null {
+  // Reuses the review projection rather than assembling a second shape from the
+  // same recommendation. Two shapes drift; one does not.
+  const rows = normRows({ search: itemId, limit: 500 });
+  return rows.rows.find((row) => row.itemId === itemId && row.plantId === plantId) ?? null;
 }
 
 /** The approved sources for a material, largest allocation first. */
