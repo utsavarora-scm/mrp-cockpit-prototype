@@ -20,6 +20,8 @@ import { useParams } from 'next/navigation';
 import type { ItemDetail } from '@/lib/api-types';
 import { ProjectionChart } from '@/components/planning/ProjectionChart';
 import { NormRail } from '@/components/planning/NormRail';
+import { ExplainDrawer } from '@/components/planning/ExplainDrawer';
+import { TimePhasedTable } from '@/components/planning/TimePhasedTable';
 
 export default function MaterialPage() {
   const params = useParams<{ itemId: string; plantId: string }>();
@@ -91,6 +93,37 @@ export default function MaterialPage() {
         <div className='col-span-12 xl:col-span-3'>
           <NormRail detail={item} />
         </div>
+      </div>
+
+      {item.recommendation ? (
+        <section className='bg-card mt-6 flex flex-wrap items-center justify-between gap-4 rounded-lg border p-6'>
+          <div>
+            <h2 className='text-muted-foreground text-[15px] font-semibold tracking-[0.04em] uppercase'>
+              What the plan recommends
+            </h2>
+            <p className='mt-2 text-[14px] leading-relaxed'>
+              Order{' '}
+              <span className='text-[22px] font-semibold tracking-[-0.02em] tabular-nums'>
+                {formatNumber(item.recommendation.recommendedQty)} {item.baseUom}
+              </span>{' '}
+              for receipt on {formatDateFull(item.recommendation.receiptDate)}
+              {item.recommendation.isReleaseInPast ? (
+                <span className='text-status-critical'>
+                  {' '}
+                  — which had to be placed on {formatDateFull(item.recommendation.releaseDate)}, already past
+                </span>
+              ) : (
+                <>, placed by {formatDateFull(item.recommendation.releaseDate)}</>
+              )}
+              .
+            </p>
+          </div>
+          <ExplainDrawer detail={item} explain={item.recommendation} />
+        </section>
+      ) : null}
+
+      <div className='mt-6'>
+        <TimePhasedTable detail={item} />
       </div>
 
       {/* Supporting figures — 32px, so they never compete with the chart */}

@@ -937,7 +937,8 @@ function buildReceiptHistory(rng: Rng, itemPlants: ItemPlant[], itemVendors: Ite
     orderedEpoch: number,
     leadTimeDays: number,
     promisedDays: number,
-    qty: number
+    qty: number,
+    matchedLineId: string | null = `${poId}-10`
   ): void => {
     const receivedOn = fromEpochDay(orderedEpoch + leadTimeDays);
     history.push({
@@ -951,6 +952,7 @@ function buildReceiptHistory(rng: Rng, itemPlants: ItemPlant[], itemVendors: Ite
       qty,
       // Computed from the dates, never asserted alongside them.
       actualLeadTimeDays: toEpochDay(receivedOn) - orderedEpoch,
+      matchedLineId,
     });
   };
 
@@ -1028,7 +1030,8 @@ function buildReceiptHistory(rng: Rng, itemPlants: ItemPlant[], itemVendors: Ite
       PLANNING_EPOCH - 62 - index * 91,
       leadTime,
       HERO.maintainedOrderDays,
-      480
+      480,
+      null
     );
   });
 

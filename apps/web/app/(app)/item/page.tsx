@@ -26,6 +26,7 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useState } from 'react';
 
 import type { MaterialRow, MaterialsQueryResult } from '@/lib/api-types';
+import { useViewState } from '@/lib/view-state';
 
 type StatusFilter = 'ALL' | MaterialRow['status'];
 
@@ -63,12 +64,17 @@ function MaterialsTable() {
   const status: StatusFilter = chosen ?? (requested && requested in STATUS_LABEL ? (requested as StatusFilter) : 'ALL');
   const setStatus = setChosen;
 
+  // Scoped by the top bar's plant filter, which is the only reason that control
+  // is live rather than decorative.
+  const plantId = useViewState((state) => state.plantId);
+
   const materials = useQuery({
-    queryKey: ['materials', search, status],
+    queryKey: ['materials', search, status, plantId],
     queryFn: async (): Promise<MaterialsQueryResult> => {
       const params = new URLSearchParams({ scenario: 'baseline', limit: '250' });
       if (search) params.set('search', search);
       if (status !== 'ALL') params.set('status', status);
+      if (plantId) params.set('plant', plantId);
       const response = await fetch(`/api/materials?${params.toString()}`);
       if (!response.ok) throw new Error('The materials table could not be loaded.');
       return response.json();

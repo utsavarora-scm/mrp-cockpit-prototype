@@ -17,6 +17,7 @@ import {
   type ItemPlant,
   type MrpResult,
   type PlanningSnapshot,
+  type ReceiptHistory,
   type SnapshotMutation,
 } from '@repo/domain';
 import { reviewPeriodDays, demandStdDev } from '@repo/mrp-engine';
@@ -26,14 +27,17 @@ import type {
   DeliveryLineView,
   ItemDetail,
   ItemPosition,
+  LeadTimeEvidence,
   MaterialRow,
   MaterialsQueryResult,
   MrpExplain,
   OverridePreview,
   ParameterHealth,
   PlanningPosition,
+  PlantOption,
   PurchaseOrderView,
   TimePhasedRow,
+  VendorSplit,
 } from '../api-types';
 import { dataPack, planFor, planWithParamOverride, snapshotFor } from './planning-session';
 
@@ -66,10 +70,16 @@ const HEALTH_WEIGHTS = { completeness: 0.4, freshness: 0.3, consistency: 0.3 } a
 export function cockpitSummary(scenarioId: string): CockpitSummary {
   const plan = planFor(scenarioId);
   const pack = dataPack();
+  const snapshot = snapshotFor();
+  const plants: PlantOption[] = snapshot.plants
+    .map((plant) => ({ id: plant.id, name: plant.name, type: plant.type }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+
   return {
     scenarioId,
     planningDate: pack.planningDate,
     horizonDays: pack.horizonDays,
+    plants,
     elapsedMs: plan.elapsedMs,
     planningPosition: planningPosition(scenarioId),
   };
@@ -325,35 +335,48 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
   const balanceConfirmed = runningBalance(opening, [confirmed], requirements);
   const balanceWithPlanned = runningBalance(opening, [confirmed, unconfirmed, plannedIn], requirements);
 
+  // The same vocabulary the chart above the table uses. Two names for one
+  // series across a screen is exactly what made the last build unreadable.
   const grid: TimePhasedRow[] = [
     {
       key: 'gross',
-      label: 'Gross requirements',
-      values: Array.from(itemPlan.grossRequirements),
+      label: 'Consumed by production',
+      values: requirements,
       children: demandByType,
+      aggregate: 'SUM',
     },
     {
-      key: 'scheduled',
-      label: 'Scheduled receipts',
-      values: Array.from(itemPlan.scheduledReceipts),
+      key: 'confirmed',
+      label: 'Received · confirmed',
+      values: confirmed,
       children: supplyRows,
       editable: true,
+      aggregate: 'SUM',
     },
-    { key: 'planned', label: 'Planned receipts', values: Array.from(itemPlan.plannedReceipts) },
-    { key: 'pab', label: 'Projected available', values: Array.from(itemPlan.projectedAvailable), emphasis: 'BALANCE' },
+    { key: 'unconfirmed', label: 'Received · not yet confirmed', values: unconfirmed, aggregate: 'SUM' },
+    { key: 'planned', label: 'Recommended by the plan', values: plannedIn, aggregate: 'SUM' },
     {
-      key: 'pab-feasible',
-      label: 'Projected available — orderable supply only',
-      values: Array.from(itemPlan.projectedAvailableFeasible),
+      key: 'balance-planned',
+      label: 'Stock on hand — the plan’s position',
+      values: balanceWithPlanned,
       emphasis: 'BALANCE',
+      aggregate: 'LAST',
     },
     {
-      key: 'safety',
-      label: 'Safety stock',
+      key: 'balance-confirmed',
+      label: 'Stock on hand — committed supply only',
+      values: balanceConfirmed,
+      emphasis: 'BALANCE',
+      aggregate: 'LAST',
+    },
+    {
+      key: 'norm',
+      label: 'Norm',
       values: new Array(plan.horizonDays + 1).fill(itemPlan.safetyStock),
       emphasis: 'THRESHOLD',
+      aggregate: 'LAST',
     },
-    { key: 'cover', label: 'Days of cover', values: Array.from(itemPlan.daysOfCover) },
+    { key: 'cover', label: 'Days of cover', values: Array.from(itemPlan.daysOfCover), aggregate: 'LAST' },
   ];
 
   return {
@@ -391,6 +414,8 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
     daysOfCover: Array.from(itemPlan.daysOfCover),
     grid,
     parameters: parameterHealth(master, item, itemPlan, snapshot),
+    leadTime: leadTimeEvidence(snapshot, master, itemId, plantId),
+    vendors: vendorSplit(snapshot, itemId, plantId),
     healthScore: healthScoreFor(master, snapshot, itemId, plantId),
     position: itemPosition(itemPlan, snapshot, itemId, plantId, planningEpochDay),
     purchaseOrders: purchaseOrders(snapshot, itemId, plantId),
@@ -587,16 +612,99 @@ function explainRecommendation(
   };
 }
 
-/** Mean actual lead time from goods-receipt history, or null where there is none. */
-function observedLeadTimeFor(snapshot: PlanningSnapshot, itemId: string, plantId: string): number | null {
-  let total = 0;
-  let count = 0;
+/**
+ * Receipts for one item-plant, most recent first, split by whether they
+ * reconciled to a delivery line.
+ *
+ * Only matched receipts carry a trustworthy ordered-on date, so only they feed
+ * the reconstruction. Averaging all seventeen of the hero material's receipts
+ * gives 47.2 days; the fourteen matched ones give 47.0, which is the figure
+ * Brief A.1 reconstructs the norm from.
+ */
+function receiptsFor(
+  snapshot: PlanningSnapshot,
+  itemId: string,
+  plantId: string,
+): { matched: ReceiptHistory[]; unmatched: ReceiptHistory[] } {
+  const matched: ReceiptHistory[] = [];
+  const unmatched: ReceiptHistory[] = [];
   for (const receipt of snapshot.receiptHistory) {
     if (receipt.itemId !== itemId || receipt.plantId !== plantId) continue;
-    total += receipt.actualLeadTimeDays;
-    count += 1;
+    (receipt.matchedLineId === null ? unmatched : matched).push(receipt);
   }
-  return count > 0 ? total / count : null;
+  const byRecency = (a: ReceiptHistory, b: ReceiptHistory): number =>
+    a.receivedOn !== b.receivedOn ? (a.receivedOn < b.receivedOn ? 1 : -1) : a.poId < b.poId ? 1 : -1;
+  matched.sort(byRecency);
+  unmatched.sort(byRecency);
+  return { matched, unmatched };
+}
+
+/** Mean actual lead time from matched goods receipts, or null where there is none. */
+function observedLeadTimeFor(snapshot: PlanningSnapshot, itemId: string, plantId: string): number | null {
+  const { matched } = receiptsFor(snapshot, itemId, plantId);
+  if (matched.length === 0) return null;
+  let total = 0;
+  for (const receipt of matched) total += receipt.actualLeadTimeDays;
+  return total / matched.length;
+}
+
+/** The approved sources for a material, largest allocation first. */
+function vendorSplit(snapshot: PlanningSnapshot, itemId: string, plantId: string): VendorSplit[] {
+  const vendors = new Map(snapshot.vendors.map((vendor) => [vendor.id, vendor]));
+  return snapshot.itemVendors
+    .filter((row) => row.itemId === itemId && row.plantId === plantId)
+    .map((row) => ({
+      vendorId: row.vendorId,
+      vendorName: vendors.get(row.vendorId)?.name ?? null,
+      isPrimary: row.isPrimary,
+      allocationShare: row.allocationShare,
+      leadTimeDays: row.leadTimeDays,
+      isImport: row.isImport,
+    }))
+    .sort((a, b) => b.allocationShare - a.allocationShare || a.vendorId.localeCompare(b.vendorId));
+}
+
+/** Everything the Explain drawer needs to justify the lead time it used. */
+function leadTimeEvidence(
+  snapshot: PlanningSnapshot,
+  master: ItemPlant,
+  itemId: string,
+  plantId: string,
+): LeadTimeEvidence {
+  const { matched, unmatched } = receiptsFor(snapshot, itemId, plantId);
+  const vendorNames = new Map(snapshot.vendors.map((vendor) => [vendor.id, vendor.name]));
+
+  let mean: number | null = null;
+  let stdDev: number | null = null;
+  if (matched.length > 0) {
+    let total = 0;
+    for (const receipt of matched) total += receipt.actualLeadTimeDays;
+    mean = total / matched.length;
+    let variance = 0;
+    for (const receipt of matched) variance += (receipt.actualLeadTimeDays - mean) ** 2;
+    // Population, matching `observed.ts` — the two must never disagree.
+    stdDev = Math.sqrt(variance / matched.length);
+  }
+
+  return {
+    maintainedDays: master.leadTimeDays,
+    observedMeanDays: mean,
+    observedStdDevDays: stdDev,
+    matchedCount: matched.length,
+    unmatchedCount: unmatched.length,
+    receipts: matched.map((receipt) => ({
+      poId: receipt.poId,
+      vendorId: receipt.vendorId,
+      vendorName: vendorNames.get(receipt.vendorId) ?? null,
+      orderedOn: receipt.orderedOn,
+      promisedOn: receipt.promisedOn,
+      receivedOn: receipt.receivedOn,
+      qty: receipt.qty,
+      actualLeadTimeDays: receipt.actualLeadTimeDays,
+    })),
+    paramsLastChangedOn: master.paramsLastChangedOn,
+    maintainedSource: 'SAP MARC · planned delivery time',
+  };
 }
 
 function splitDemandByType(
@@ -627,7 +735,12 @@ function splitDemandByType(
   for (const element of plan.derivedDemand) add(element);
 
   return [...byType.entries()]
-    .map(([label, series]) => ({ key: `demand-${label}`, label: humanise(label), values: Array.from(series) }))
+    .map(([label, series]) => ({
+      key: `demand-${label}`,
+      label: humanise(label),
+      values: Array.from(series),
+      aggregate: 'SUM' as const,
+    }))
     .sort((a, b) => a.label.localeCompare(b.label));
 }
 
@@ -715,6 +828,7 @@ function splitSupply(
         label: `${element.id} · ${element.type.replace('_', ' ').toLowerCase()}${element.isFirm ? ' · firm' : ''}`,
         values,
         editable: true,
+        aggregate: 'SUM',
       } satisfies TimePhasedRow;
     });
 }
@@ -730,14 +844,8 @@ function parameterHealth(
   itemPlan: MrpResult['plans'] extends Map<string, infer T> ? T : never,
   snapshot: PlanningSnapshot,
 ): ParameterHealth[] {
-  const receipts = snapshot.receiptHistory.filter(
-    (receipt) => receipt.itemId === master.itemId && receipt.plantId === master.plantId,
-  );
-  const observedLeadTime =
-    receipts.length > 0
-      ? receipts.slice(0, 6).reduce((sum, receipt) => sum + receipt.actualLeadTimeDays, 0) /
-        Math.min(receipts.length, 6)
-      : null;
+  const { matched: matchedReceipts } = receiptsFor(snapshot, master.itemId, master.plantId);
+  const observedLeadTime = observedLeadTimeFor(snapshot, master.itemId, master.plantId);
 
   const sigma = demandStdDev(itemPlan.underlyingDemand, reviewPeriodDays(master.leadTimeDays));
   const calculatedSafetyStock =
@@ -763,7 +871,7 @@ function parameterHealth(
               Math.abs(observedLeadTime - master.leadTimeDays) / Math.max(master.leadTimeDays, 1) > LEAD_TIME_DRIFT_PCT
             ? 'DRIFTED'
             : 'FRESH',
-      note: receipts.length > 0 ? `Across the last ${Math.min(receipts.length, 6)} receipts` : null,
+      note: matchedReceipts.length > 0 ? `Across ${matchedReceipts.length} matched receipts` : null,
     },
     {
       field: 'safetyStock',

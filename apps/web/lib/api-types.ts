@@ -36,10 +36,19 @@ export interface PlanningPosition {
   };
 }
 
+/** A plant the top-bar filter can scope to. */
+export interface PlantOption {
+  id: string;
+  name: string;
+  type: 'OWN' | 'COPACKER';
+}
+
 export interface CockpitSummary {
   scenarioId: string;
   planningDate: string;
   horizonDays: number;
+  /** Plants in the active pack, for the top-bar filter. */
+  plants: PlantOption[];
   /** Wall-clock milliseconds of the run behind this summary. */
   elapsedMs: number;
   planningPosition: PlanningPosition;
@@ -95,12 +104,20 @@ export interface ParameterHealth {
 export interface TimePhasedRow {
   key: string;
   label: string;
-  /** One value per bucket. */
+  /** One value per day. */
   values: number[];
   /** Rows the UI can expand into, e.g. gross requirements by demand type. */
   children?: TimePhasedRow[];
   editable?: boolean;
   emphasis?: 'BALANCE' | 'THRESHOLD' | 'NONE';
+  /**
+   * How the row collapses when days are bucketed into weeks or periods.
+   *
+   * A flow (what moved) sums; a level (what is held at an instant) takes the
+   * closing value. Getting this wrong is not a rounding difference — summing a
+   * stock balance over a week reports seven times the stock.
+   */
+  aggregate: 'SUM' | 'LAST';
 }
 
 export interface DeliveryLineView {
@@ -180,6 +197,57 @@ export interface MrpExplain {
   totalOffsetDays: number;
 }
 
+/** One goods receipt, as the Explain drawer lists it. */
+export interface LeadTimeReceipt {
+  poId: string;
+  vendorId: string;
+  vendorName: string | null;
+  orderedOn: string;
+  promisedOn: string;
+  receivedOn: string;
+  qty: number;
+  actualLeadTimeDays: number;
+}
+
+/**
+ * What the observed lead time is reconstructed from.
+ *
+ * The drawer's second level: a planner who does not believe the number clicks
+ * once more and reads the receipts it was averaged over. Unmatched receipts are
+ * counted and named as excluded rather than quietly dropped — a figure that
+ * hides its own exclusions is the kind that loses an audience.
+ */
+export interface LeadTimeEvidence {
+  maintainedDays: number | null;
+  observedMeanDays: number | null;
+  observedStdDevDays: number | null;
+  matchedCount: number;
+  unmatchedCount: number;
+  /** The matched receipts, most recent first. */
+  receipts: LeadTimeReceipt[];
+  paramsLastChangedOn: string;
+  /** Where the maintained value lives in the system of record. */
+  maintainedSource: string;
+}
+
+/**
+ * One approved source for a material, and the share of volume it carries.
+ *
+ * The allocation share is what the scheduling engine splits an order across in
+ * Checkpoint B, so it is worth showing here rather than inventing later: a
+ * planner who can see 60/40 on the screen is not surprised when the schedule
+ * splits 60/40.
+ */
+export interface VendorSplit {
+  vendorId: string;
+  vendorName: string | null;
+  isPrimary: boolean;
+  /** 0–1. */
+  allocationShare: number;
+  leadTimeDays: number;
+  isImport: boolean;
+}
+
 /** The planning position for one material, for the detail header. */
 export interface ItemPosition {
   demand: number;
@@ -236,6 +304,8 @@ export interface ItemDetail {
   daysOfCover: number[];
   grid: TimePhasedRow[];
   parameters: ParameterHealth[];
+  leadTime: LeadTimeEvidence;
+  vendors: VendorSplit[];
   healthScore: number;
   position: ItemPosition;
   purchaseOrders: PurchaseOrderView[];

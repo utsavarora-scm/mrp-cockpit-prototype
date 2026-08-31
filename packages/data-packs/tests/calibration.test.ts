@@ -41,8 +41,15 @@ function percentile(values: readonly number[], p: number): number {
 const heroReceipts = snapshot.receiptHistory.filter(
   (receipt) => receipt.itemId === HERO.itemId && receipt.plantId === HERO.plantId
 );
-/** Receipts that will match a delivery line. The rest go to the unmatched queue. */
-const isMatchable = (receipt: ReceiptHistory): boolean => !receipt.poId.startsWith('GRN-UNMATCHED');
+/**
+ * Receipts that reconciled to a delivery line. The rest go to the unmatched
+ * queue and are excluded from lead-time reconstruction.
+ *
+ * Read off the field the app itself reads, not off the PO-number prefix: the
+ * prefix is a naming convention inside the generator, and a test that asserts
+ * against it can pass while the projection layer disagrees.
+ */
+const isMatchable = (receipt: ReceiptHistory): boolean => receipt.matchedLineId !== null;
 
 describe('gcpl-soaps data pack', () => {
   it('reports its shape', () => {

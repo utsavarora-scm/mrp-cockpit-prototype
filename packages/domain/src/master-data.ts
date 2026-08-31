@@ -186,6 +186,16 @@ export interface ReceiptHistory {
   qty: number;
   /** receivedOn − orderedOn, in calendar days. */
   actualLeadTimeDays: number;
+  /**
+   * The delivery line this receipt reconciles to, or null when nothing matched.
+   *
+   * A real goods-receipt feed never matches cleanly: a receipt lands against a
+   * cancelled line, two deliveries arrive consolidated under one document, a
+   * batch is returned and reissued. Roughly 4% fall out. They are kept, never
+   * dropped — but they are excluded from lead-time reconstruction, because an
+   * unmatched receipt has no reliable ordered-on date behind it.
+   */
+  matchedLineId: string | null;
 }
 
 export interface SubstituteItem {
