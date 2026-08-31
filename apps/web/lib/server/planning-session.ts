@@ -14,7 +14,7 @@
 
 import { getDataPack, type DataPack } from '@repo/data-packs';
 import type { ItemPlant, MrpOptions, MrpResult, PlanningSnapshot, SnapshotMutation } from '@repo/domain';
-import { runMrp } from '@repo/mrp-engine';
+import { runMrp } from '@repo/planning-engine';
 
 /**
  * A planner override, as recorded.

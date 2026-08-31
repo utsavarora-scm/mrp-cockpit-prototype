@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { runMrp } from '@repo/mrp-engine';
+import { runMrp } from '@repo/planning-engine';
 import { planKey, zScore, type ReceiptHistory } from '@repo/domain';
 
 import { getDataPack, HERO, PACKAGING_DRIFT, DUAL_SOURCED } from '../src/index';

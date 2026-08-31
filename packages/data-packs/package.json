@@ -16,7 +16,7 @@
     "@repo/domain": "workspace:*"
   },
   "devDependencies": {
-    "@repo/mrp-engine": "workspace:*",
+    "@repo/planning-engine": "workspace:*",
     "@repo/typescript-config": "workspace:*",
     "typescript": "5.8.2",
     "vitest": "^3.2.4"

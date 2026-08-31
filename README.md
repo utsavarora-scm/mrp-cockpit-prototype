@@ -51,14 +51,14 @@ explain what will be there and what is already computed.
 ```
 apps/web                     Next.js App Router — screens, API routes, session
 packages/domain              Shared types; every impact coefficient in one openable file
-packages/mrp-engine          The engine. Pure, no I/O, no framework, fully tested
+packages/planning-engine          The engine. Pure, no I/O, no framework, fully tested
 packages/adapters            SystemOfRecordAdapter + mock SAP / Kinaxis / o9
 packages/data-packs          Seeded dataset generators, selected by NEXT_PUBLIC_DATA_PACK
 packages/ui                  The shared shadcn component library
 ```
 
-`packages/mrp-engine` imports nothing from the app, holds no database client and never reads a clock — `planningDate` is
-always injected. That is what makes `packages/mrp-engine/tests/worked-example.test.ts` openable in front of someone who
+`packages/planning-engine` imports nothing from the app, holds no database client and never reads a clock — `planningDate` is
+always injected. That is what makes `packages/planning-engine/tests/worked-example.test.ts` openable in front of someone who
 wants to check the arithmetic.
 
 ## Design notes

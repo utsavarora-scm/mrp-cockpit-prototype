@@ -7,8 +7,8 @@
       "@repo/ui/*": ["../../packages/ui/src/*"],
       "@repo/domain": ["../../packages/domain/src/index.ts"],
       "@repo/domain/*": ["../../packages/domain/src/*"],
-      "@repo/mrp-engine": ["../../packages/mrp-engine/src/index.ts"],
-      "@repo/mrp-engine/*": ["../../packages/mrp-engine/src/*"],
+      "@repo/planning-engine": ["../../packages/planning-engine/src/index.ts"],
+      "@repo/planning-engine/*": ["../../packages/planning-engine/src/*"],
       "@repo/data-packs": ["../../packages/data-packs/src/index.ts"],
       "@repo/data-packs/*": ["../../packages/data-packs/src/*"]
     },

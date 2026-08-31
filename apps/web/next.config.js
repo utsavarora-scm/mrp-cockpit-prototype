@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ['@repo/ui', '@repo/domain', '@repo/mrp-engine', '@repo/adapters', '@repo/data-packs'],
+  transpilePackages: ['@repo/ui', '@repo/domain', '@repo/planning-engine', '@repo/adapters', '@repo/data-packs'],
   reactStrictMode: false,
   /**
    * The demo gets driven from other machines on the LAN, not just localhost.

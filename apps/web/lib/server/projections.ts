@@ -20,7 +20,7 @@ import {
   type ReceiptHistory,
   type SnapshotMutation,
 } from '@repo/domain';
-import { reviewPeriodDays, demandStdDev } from '@repo/mrp-engine';
+import { reviewPeriodDays, demandStdDev } from '@repo/planning-engine';
 
 import type {
   CockpitSummary,
