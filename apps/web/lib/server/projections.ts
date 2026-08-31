@@ -121,10 +121,10 @@ function normsSummary(scenarioId: string): NormsSummary {
  * hero material's horizon-worst is 1,518 MT; the shortfall on the day it
  * actually bites is 263. The second number is the one someone has to solve.
  */
-function shortfallAtFirstBreach(itemPlan: {
-  projectedAvailableFeasible: Float64Array;
-  safetyStock: number;
-}): { shortfall: number; day: number } {
+function shortfallAtFirstBreach(itemPlan: { projectedAvailableFeasible: Float64Array; safetyStock: number }): {
+  shortfall: number;
+  day: number;
+} {
   const horizon = itemPlan.projectedAvailableFeasible.length - 1;
   for (let day = 0; day <= horizon; day += 1) {
     const balance = itemPlan.projectedAvailableFeasible[day] as number;
@@ -220,7 +220,13 @@ function gapAttribution(scenarioId: string): GapSegment[] {
   const share = (value: number): number => (total === 0 ? 0 : value / total);
 
   return [
-    { kind: 'NEEDS_PO', label: 'Needs an order raising', value: needsPo, share: share(needsPo), materials: needsPoCount },
+    {
+      kind: 'NEEDS_PO',
+      label: 'Needs an order raising',
+      value: needsPo,
+      share: share(needsPo),
+      materials: needsPoCount,
+    },
     { kind: 'ARRIVING_LATE', label: 'Ordered, arriving late', value: late, share: share(late), materials: lateCount },
     {
       kind: 'WRONG_PLANT',
@@ -265,9 +271,7 @@ function needsAttention(scenarioId: string): AttentionRow[] {
 
     const recommendation = norms.recommendations.get(key);
     const { shortfall, day: breachDay } = shortfallAtFirstBreach(itemPlan);
-    const normGap = recommendation
-      ? Math.max(recommendation.excessCapital, recommendation.unprotectedExposure)
-      : 0;
+    const normGap = recommendation ? Math.max(recommendation.excessCapital, recommendation.unprotectedExposure) : 0;
     const valueAtStake = Math.max(shortfall * item.standardCost, normGap);
     if (valueAtStake <= 0) continue;
 
@@ -644,7 +648,8 @@ export function itemDetail(scenarioId: string, itemId: string, plantId: string):
     vendors: vendorSplit(snapshot, itemId, plantId),
     norm: normRowFor(itemId, plantId),
     plannedOrderId:
-      itemPlan.plannedReceipts.some((qty) => qty > 0) || itemPlan.projectedAvailableFeasible.some((b) => b < itemPlan.safetyStock)
+      itemPlan.plannedReceipts.some((qty) => qty > 0) ||
+      itemPlan.projectedAvailableFeasible.some((b) => b < itemPlan.safetyStock)
         ? plannedOrderId(itemId, plantId)
         : null,
     healthScore: healthScoreFor(master, snapshot, itemId, plantId),

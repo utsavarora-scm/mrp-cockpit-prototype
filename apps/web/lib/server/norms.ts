@@ -67,10 +67,10 @@ export function observationsFor(
   adherence: AdherenceResult,
   snapshot: PlanningSnapshot,
   itemId: string,
-  plantId: string
+  plantId: string,
 ): LeadTimeObservation[] {
   const imports = new Set(
-    snapshot.itemVendors.filter((row) => row.isImport).map((row) => `${row.itemId}@${row.plantId}@${row.vendorId}`)
+    snapshot.itemVendors.filter((row) => row.isImport).map((row) => `${row.itemId}@${row.plantId}@${row.vendorId}`),
   );
   return adherence.matched
     .filter((row) => row.receipt.itemId === itemId && row.receipt.plantId === plantId)
@@ -93,7 +93,7 @@ function compute(scenarioId: string): CategoryNorms {
 
   const items = new Map(snapshot.items.map((item) => [item.id, item]));
   const vendorFor = new Map(
-    snapshot.itemVendors.filter((row) => row.isPrimary).map((row) => [`${row.itemId}@${row.plantId}`, row])
+    snapshot.itemVendors.filter((row) => row.isPrimary).map((row) => [`${row.itemId}@${row.plantId}`, row]),
   );
 
   const recommendations = new Map<string, NormRecommendation>();

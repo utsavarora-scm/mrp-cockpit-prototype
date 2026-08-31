@@ -21,7 +21,7 @@ export async function GET(request: Request) {
         staleDays: staleDays ? Number(staleDays) : undefined,
         limit: Number(url.searchParams.get('limit')) || undefined,
       },
-      url.searchParams.get('scenario') ?? 'baseline'
-    )
+      url.searchParams.get('scenario') ?? 'baseline',
+    ),
   );
 }

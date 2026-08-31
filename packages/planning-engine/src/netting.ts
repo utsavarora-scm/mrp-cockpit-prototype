@@ -149,8 +149,7 @@ export function netItemPlant(input: NettingInput): NettingResult {
   const safetyStock = itemPlant.safetyStock ?? 0;
   const flatThreshold = itemPlant.mrpType === 'VB' ? (itemPlant.reorderPoint ?? safetyStock) : safetyStock;
   const normByBucket = input.normByBucket;
-  const thresholdAt = (day: number): number =>
-    normByBucket ? (normByBucket[day] ?? flatThreshold) : flatThreshold;
+  const thresholdAt = (day: number): number => (normByBucket ? (normByBucket[day] ?? flatThreshold) : flatThreshold);
   const planningActive = isPlanningActive(itemPlant);
 
   const totalOffset = input.effectiveLeadTimeDays + itemPlant.grProcessingTimeDays + itemPlant.safetyTimeDays;

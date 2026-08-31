@@ -55,9 +55,7 @@ describe('adherence over the whole pack', () => {
   });
 
   it('matches fourteen of the hero material’s seventeen receipts', () => {
-    const seeded = snapshot.receiptHistory.filter(
-      (row) => row.itemId === HERO.itemId && row.plantId === HERO.plantId
-    );
+    const seeded = snapshot.receiptHistory.filter((row) => row.itemId === HERO.itemId && row.plantId === HERO.plantId);
     const matched = observationsFor(HERO.itemId, HERO.plantId);
     const queued = adherence.unmatched.filter((row) => row.receipt.itemId === HERO.itemId);
 
@@ -71,13 +69,9 @@ describe('Brief A.1, reconstructed end to end from the pack', () => {
   const observations = observationsFor(HERO.itemId, HERO.plantId);
   const leadTime = reconstructLeadTime(observations, { planningDate: pack.planningDate })!;
 
-  const itemPlant = snapshot.itemPlants.find(
-    (row) => row.itemId === HERO.itemId && row.plantId === HERO.plantId
-  )!;
+  const itemPlant = snapshot.itemPlants.find((row) => row.itemId === HERO.itemId && row.plantId === HERO.plantId)!;
   const item = snapshot.items.find((row) => row.id === HERO.itemId)!;
-  const vendor = snapshot.itemVendors.find(
-    (row) => row.itemId === HERO.itemId && row.plantId === HERO.plantId
-  )!;
+  const vendor = snapshot.itemVendors.find((row) => row.itemId === HERO.itemId && row.plantId === HERO.plantId)!;
 
   it('reconstructs 47 days varying by 11, from the pack’s own receipts', () => {
     expect(leadTime.count).toBe(14);

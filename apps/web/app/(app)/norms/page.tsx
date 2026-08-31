@@ -295,8 +295,7 @@ function Expansion({ row }: { row: NormRow }) {
           <Histogram observations={row.observations} maintained={row.maintainedOrderDays} mean={weighted.mean} />
           <p className='text-muted-foreground mt-3 text-[12px] leading-relaxed'>
             {row.observations.length} matched receipts, {weighted.mean.toFixed(1)} days on average, varying by{' '}
-            {weighted.stdDev.toFixed(1)}.
-            {row.unmatchedCount > 0 ? ` ${row.unmatchedCount} unmatched, excluded.` : ''}
+            {weighted.stdDev.toFixed(1)}.{row.unmatchedCount > 0 ? ` ${row.unmatchedCount} unmatched, excluded.` : ''}
             {row.maintainedOrderDays !== null ? ` Planned on ${row.maintainedOrderDays}.` : ''}
           </p>
 
@@ -524,7 +523,9 @@ function Calculation({ row }: { row: NormRow }) {
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h3 className='text-muted-foreground mb-3 text-[12px] font-semibold tracking-[0.04em] uppercase'>{children}</h3>;
+  return (
+    <h3 className='text-muted-foreground mb-3 text-[12px] font-semibold tracking-[0.04em] uppercase'>{children}</h3>
+  );
 }
 
 function ChipGroup({

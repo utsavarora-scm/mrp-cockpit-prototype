@@ -57,9 +57,9 @@ packages/data-packs          Seeded dataset generators, selected by NEXT_PUBLIC_
 packages/ui                  The shared shadcn component library
 ```
 
-`packages/planning-engine` imports nothing from the app, holds no database client and never reads a clock — `planningDate` is
-always injected. That is what makes `packages/planning-engine/tests/worked-example.test.ts` openable in front of someone who
-wants to check the arithmetic.
+`packages/planning-engine` imports nothing from the app, holds no database client and never reads a clock —
+`planningDate` is always injected. That is what makes `packages/planning-engine/tests/worked-example.test.ts` openable
+in front of someone who wants to check the arithmetic.
 
 ## Design notes
 

@@ -360,14 +360,12 @@ function buildRationale(context: {
   const quantityClause =
     last === first
       ? `Each line at ${round(first)}`
-      : `Four lines at ${round(first)} and a last of ${round(last)}`.replace(
-          'Four',
-          String(lineCount - 1)
-        );
+      : `Four lines at ${round(first)} and a last of ${round(last)}`.replace('Four', String(lineCount - 1));
 
   const rounding: string[] = [];
   if (input.moq && input.moq > 0) rounding.push(`clears the ${round(input.moq)} minimum`);
-  if (input.incrementQty && input.incrementQty > 0) rounding.push(`rounds to the ${round(input.incrementQty)} increment`);
+  if (input.incrementQty && input.incrementQty > 0)
+    rounding.push(`rounds to the ${round(input.incrementQty)} increment`);
   parts.push(rounding.length > 0 ? `${quantityClause} ${rounding.join(' and ')}.` : `${quantityClause}.`);
 
   const cover = lines[0]?.coverDays ?? 0;

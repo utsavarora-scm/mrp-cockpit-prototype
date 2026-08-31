@@ -82,7 +82,9 @@ export function reconstructLeadTime(
 ): LeadTimeDistribution | null {
   if (observations.length === 0) return null;
 
-  const sorted = [...observations].sort((a, b) => (a.receivedOn < b.receivedOn ? 1 : a.receivedOn > b.receivedOn ? -1 : 0));
+  const sorted = [...observations].sort((a, b) =>
+    a.receivedOn < b.receivedOn ? 1 : a.receivedOn > b.receivedOn ? -1 : 0
+  );
 
   // Winsorise at P99: a single mis-keyed receipt date should not set the norm
   // for a whole material, but the observation is pulled in rather than dropped,

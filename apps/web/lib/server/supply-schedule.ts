@@ -34,7 +34,11 @@ function parsePlannedOrderId(orderId: string): { itemId: string; plantId: string
   return { itemId: rest.slice(0, split), plantId: rest.slice(split + 1) };
 }
 
-export function supplySchedule(orderId: string, quantityOverride?: number, scenarioId = 'baseline'): ScheduleView | null {
+export function supplySchedule(
+  orderId: string,
+  quantityOverride?: number,
+  scenarioId = 'baseline',
+): ScheduleView | null {
   const snapshot = snapshotFor();
   const plan = planFor(scenarioId);
   const norms = categoryNorms(scenarioId);
@@ -61,7 +65,7 @@ export function supplySchedule(orderId: string, quantityOverride?: number, scena
   // --- Step 1: the order window ------------------------------------------
   const orderWindowDays = Math.max(
     1,
-    Math.round(recommendation?.recommendedOrderDays ?? (master.leadTimeDays ?? 30) + master.grProcessingTimeDays)
+    Math.round(recommendation?.recommendedOrderDays ?? (master.leadTimeDays ?? 30) + master.grProcessingTimeDays),
   );
   const windowEnd = Math.min(orderWindowDays, horizon);
 
@@ -73,13 +77,11 @@ export function supplySchedule(orderId: string, quantityOverride?: number, scena
     committedInWindow += itemPlan.scheduledReceipts[day] as number;
   }
   const targetClosing = recommendation?.constrainedStockQty ?? itemPlan.safetyStock;
-  const derivedTotal = Math.max(
-    0,
-    demandInWindow + targetClosing - itemPlan.openingStock - committedInWindow
-  );
+  const derivedTotal = Math.max(0, demandInWindow + targetClosing - itemPlan.openingStock - committedInWindow);
 
   const increment = vendor?.incrementQty ?? null;
-  const rounded = increment && increment > 0 ? Math.ceil(derivedTotal / increment) * increment : Math.round(derivedTotal);
+  const rounded =
+    increment && increment > 0 ? Math.ceil(derivedTotal / increment) * increment : Math.round(derivedTotal);
   const totalQty = quantityOverride !== undefined && quantityOverride > 0 ? quantityOverride : rounded;
 
   // --- The first day the position is uncovered -----------------------------

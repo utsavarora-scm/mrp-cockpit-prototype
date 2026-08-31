@@ -14,7 +14,7 @@ export async function GET(request: Request, context: { params: Promise<{ orderId
   const schedule = supplySchedule(
     decodeURIComponent(orderId),
     qty ? Number(qty) : undefined,
-    url.searchParams.get('scenario') ?? 'baseline'
+    url.searchParams.get('scenario') ?? 'baseline',
   );
 
   if (!schedule) return NextResponse.json({ error: 'No such order.' }, { status: 404 });

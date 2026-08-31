@@ -20,12 +20,7 @@
  * you do about it.
  */
 
-import {
-  type DeliveryLine,
-  type ReceiptHistory,
-  type SupplyElement,
-  toEpochDay,
-} from '@repo/domain';
+import { type DeliveryLine, type ReceiptHistory, type SupplyElement, toEpochDay } from '@repo/domain';
 
 /**
  * How a receipt found its delivery line, or why it did not.
@@ -158,7 +153,6 @@ export function runAdherence(input: AdherenceInput): AdherenceResult {
       continue;
     }
 
-
     // 3 — partial and over-receipts. Both are allocated, never refused: the
     // quantity variance is the finding, so discarding the receipt would delete
     // the very thing worth reporting.
@@ -221,12 +215,7 @@ function indexOpenLines(supply: SupplyElement[]): Map<string, OpenLine[]> {
   return index;
 }
 
-function measure(
-  receipt: ReceiptHistory,
-  target: OpenLine,
-  method: MatchMethod,
-  receivedQty: number
-): MatchedReceipt {
+function measure(receipt: ReceiptHistory, target: OpenLine, method: MatchMethod, receivedQty: number): MatchedReceipt {
   const received = toEpochDay(receipt.receivedOn);
   const dateVarianceDays = received - toEpochDay(target.line.plannedDate);
   const confirmationVarianceDays =

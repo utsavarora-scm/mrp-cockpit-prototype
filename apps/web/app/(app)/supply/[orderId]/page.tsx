@@ -228,9 +228,7 @@ function Timeline({ order }: { order: ScheduleView }) {
               <div
                 className={cn(
                   'w-11 rounded-t-[3px] border-t-2',
-                  infeasible
-                    ? 'border-status-critical bg-status-critical/25'
-                    : 'border-primary bg-primary/25',
+                  infeasible ? 'border-status-critical bg-status-critical/25' : 'border-primary bg-primary/25',
                 )}
                 style={{ height: `${height}px` }}
               />

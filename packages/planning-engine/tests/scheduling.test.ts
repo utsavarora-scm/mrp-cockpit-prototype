@@ -160,11 +160,7 @@ describe('scheduling engine — constraints that change the answer', () => {
   });
 
   it('never lands a delivery on a non-working day', () => {
-    const fiveDay = new WorkingCalendar(
-      { id: 'FIVE', workingDays: [1, 2, 3, 4, 5], holidays: [] },
-      PLANNING_DATE,
-      400
-    );
+    const fiveDay = new WorkingCalendar({ id: 'FIVE', workingDays: [1, 2, 3, 4, 5], holidays: [] }, PLANNING_DATE, 400);
     const schedule = scheduleOrder(heroInput({ plantCalendar: fiveDay }));
     for (const line of schedule.lines) {
       expect(fiveDay.isWorkingDay(line.requiredByEpochDay)).toBe(true);

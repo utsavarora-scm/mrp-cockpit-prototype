@@ -28,7 +28,10 @@ function receipt(overrides: Partial<ReceiptHistory> & { poId: string }): Receipt
   };
 }
 
-function order(id: string, lines: Array<{ line: number; qty: number; planned: string; confirmed?: string }>): SupplyElement {
+function order(
+  id: string,
+  lines: Array<{ line: number; qty: number; planned: string; confirmed?: string }>
+): SupplyElement {
   return {
     id,
     type: 'PO',

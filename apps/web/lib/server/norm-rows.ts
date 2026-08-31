@@ -42,7 +42,7 @@ export function normRows(query: NormsQuery = {}, scenarioId = 'baseline'): Norms
   const masters = new Map(snapshot.itemPlants.map((row) => [planKey(row.itemId, row.plantId), row]));
   const vendorNames = new Map(snapshot.vendors.map((vendor) => [vendor.id, vendor.name]));
   const primaryVendor = new Map(
-    snapshot.itemVendors.filter((row) => row.isPrimary).map((row) => [planKey(row.itemId, row.plantId), row])
+    snapshot.itemVendors.filter((row) => row.isPrimary).map((row) => [planKey(row.itemId, row.plantId), row]),
   );
 
   const planningEpoch = Date.parse(`${snapshot.systemSnapshots[0]?.lastSyncAt.slice(0, 10) ?? '2026-08-30'}T00:00:00Z`);
@@ -73,9 +73,7 @@ export function normRows(query: NormsQuery = {}, scenarioId = 'baseline'): Norms
       maintainedStockDays: master.maintainedStockDays,
       recommendedStockDays: recommendation.constrainedStockDays,
       stockDaysGap:
-        master.maintainedStockDays === null
-          ? null
-          : recommendation.constrainedStockDays - master.maintainedStockDays,
+        master.maintainedStockDays === null ? null : recommendation.constrainedStockDays - master.maintainedStockDays,
 
       maintainedQty,
       recommendedQty: recommendation.constrainedStockQty,
@@ -147,9 +145,7 @@ export function normRows(query: NormsQuery = {}, scenarioId = 'baseline'): Norms
     excessCapital: filtered.reduce((sum, row) => sum + Math.max(0, row.valueImpact), 0),
     unprotectedExposure: filtered.reduce((sum, row) => sum + Math.max(0, -row.valueImpact), 0),
     elapsedMs: norms.elapsedMs,
-    vendors: [...usedVendors.entries()]
-      .map(([id, name]) => ({ id, name }))
-      .sort((a, b) => a.id.localeCompare(b.id)),
+    vendors: [...usedVendors.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.id.localeCompare(b.id)),
   };
 }
 
@@ -169,10 +165,7 @@ function toConstraintView(constraint: NormConstraint): ConstraintView {
   };
 }
 
-function unmatchedFor(
-  norms: ReturnType<typeof categoryNorms>,
-  recommendation: NormRecommendation
-): number {
+function unmatchedFor(norms: ReturnType<typeof categoryNorms>, recommendation: NormRecommendation): number {
   let count = 0;
   for (const row of norms.adherence.unmatched) {
     if (row.receipt.itemId === recommendation.itemId && row.receipt.plantId === recommendation.plantId) count += 1;

@@ -120,8 +120,8 @@ export function ProposeDialog({ rows, onProposed }: { rows: NormRow[]; onPropose
               {JSON.stringify(payloadFor(rows), null, 2)}
             </pre>
             <p className='text-muted-foreground mt-3 text-[12px] leading-relaxed'>
-              SAP remains the system of record. This prototype computes and proposes; applying a change is a person&rsquo;s
-              decision made in SAP, and no credential in this build could write it even if one tried.
+              SAP remains the system of record. This prototype computes and proposes; applying a change is a
+              person&rsquo;s decision made in SAP, and no credential in this build could write it even if one tried.
             </p>
           </div>
         )}

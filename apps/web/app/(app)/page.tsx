@@ -200,9 +200,7 @@ function NeedsAttention({ rows }: { rows: AttentionRow[] }) {
   return (
     <section className='bg-card rounded-lg border p-6'>
       <div className='flex items-baseline justify-between'>
-        <h2 className='text-muted-foreground text-[15px] font-semibold tracking-[0.04em] uppercase'>
-          Needs attention
-        </h2>
+        <h2 className='text-muted-foreground text-[15px] font-semibold tracking-[0.04em] uppercase'>Needs attention</h2>
         <Link href='/item' className='text-primary text-[13px] font-medium hover:underline'>
           View all
         </Link>
