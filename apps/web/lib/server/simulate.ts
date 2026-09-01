@@ -70,6 +70,8 @@ export function simulate(
 
   const dateOf = (day: number): string => (day === -1 ? 'None' : fromEpochDay(context.planningEpochDay + day));
   const uom = facts.baseUom;
+  const beforeExposure = beforeMetrics.exposureInsideFence(facts.fences.maintained.earliestReceiptDay);
+  const afterExposure = afterMetrics.exposureInsideFence(afterFences.maintained.earliestReceiptDay);
 
   return {
     field,
@@ -118,11 +120,16 @@ export function simulate(
         `${format(afterMetrics.peak)} ${uom}`,
         compareNumber(beforeMetrics.peak, afterMetrics.peak, 'lower'),
       ),
+      // What a lead-time change actually moves on a material whose orders are
+      // all already unplaceable: not the balance, but how much of the exposure
+      // falls inside the fence. A peak-inventory delta here prints zero and
+      // teaches a planner that the change did nothing.
       metric(
-        'Value of the change',
-        '—',
-        `${format(Math.abs(afterMetrics.peak - beforeMetrics.peak) * facts.standardCost)} at standard cost`,
-        'SAME',
+        'Exposure no order can reach',
+        `${format(beforeExposure)} ${uom}`,
+        `${format(afterExposure)} ${uom}`,
+        compareNumber(beforeExposure, afterExposure, 'lower'),
+        `${formatMoney((afterExposure - beforeExposure) * facts.standardCost)} at standard cost`,
       ),
     ],
     beforeBalance,
@@ -150,6 +157,8 @@ interface Metrics {
   worstShortfall: number;
   peak: number;
   unreachableWeeks: (fenceDay: number) => number;
+  /** The deepest shortfall in the window no newly placed order can arrive in. */
+  exposureInsideFence: (fenceDay: number) => number;
 }
 
 function metricsOf(
@@ -179,6 +188,13 @@ function metricsOf(
     // How much of the exposure sits inside the fence — the window no purchase
     // order can reach. That is what a lead-time change actually moves.
     unreachableWeeks: (fence: number) => (firstBreach === -1 ? 0 : Math.max(0, (fence - firstBreach) / 7)),
+    exposureInsideFence: (fence: number) => {
+      let worst = 0;
+      for (let day = 0; day <= Math.min(fence, horizonDays); day += 1) {
+        worst = Math.max(worst, plan.safetyStock - (plan.projectedBeforePlanned[day] as number));
+      }
+      return Math.max(0, worst);
+    },
   };
 }
 
@@ -226,6 +242,15 @@ function round(value: number): number {
 
 function format(value: number): string {
   return Math.round(value).toLocaleString('en-IN');
+}
+
+/** Signed, in crore or lakh, because a change can go either way. */
+function formatMoney(value: number): string {
+  const sign = value >= 0 ? '+' : '−';
+  const abs = Math.abs(value);
+  if (abs >= 10_000_000) return `${sign}₹${(abs / 10_000_000).toFixed(2)} Cr`;
+  if (abs >= 100_000) return `${sign}₹${(abs / 100_000).toFixed(1)} L`;
+  return `${sign}₹${Math.round(abs).toLocaleString('en-IN')}`;
 }
 
 export { toEpochDay };
