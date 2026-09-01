@@ -9,7 +9,7 @@
 
 import type { MrpOptions, PlanningSnapshot } from '@repo/domain';
 
-import { generatePilotSnapshot, PILOT_COUNTS } from './gcpl-pilot/generate';
+import { generatePilotSnapshot, generatePreviousSnapshot, PILOT_COUNTS, type PlanChange } from './gcpl-pilot/generate';
 import { PILOT_SPEC } from './gcpl-pilot/spec';
 
 export interface DataPack {
@@ -20,6 +20,14 @@ export interface DataPack {
   horizonDays: number;
   seed: number;
   generate(): PlanningSnapshot;
+  /**
+   * The snapshot as it stood at the previous run, and what changed since.
+   *
+   * Derived by inverting a known set of changes rather than generated afresh,
+   * so the drift panel lists the materials that genuinely moved instead of
+   * every material in the book.
+   */
+  generatePrevious(current: PlanningSnapshot): { snapshot: PlanningSnapshot; changes: PlanChange[] };
   defaultOptions(scenarioId: string): MrpOptions;
 }
 
@@ -30,6 +38,7 @@ const pilot: DataPack = {
   horizonDays: PILOT_SPEC.horizonDays,
   seed: PILOT_SPEC.seed,
   generate: generatePilotSnapshot,
+  generatePrevious: generatePreviousSnapshot,
   defaultOptions: (scenarioId: string): MrpOptions => ({
     planningDate: PILOT_SPEC.planningDate,
     horizonDays: PILOT_SPEC.horizonDays,
@@ -60,6 +69,7 @@ export function listDataPacks(): DataPack[] {
 }
 
 export { PILOT_COUNTS, PILOT_SPEC };
+export { CHANGE_CAUSE_LABEL, type PlanChange } from './gcpl-pilot/generate';
 export {
   CHAIN_FG,
   CHAIN_ITEMS,

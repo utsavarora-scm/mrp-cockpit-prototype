@@ -1,23 +1,21 @@
 /**
- * Demo reset.
+ * Back to the exact starting state.
  *
- * Drops every committed change and the plan cache, keeping the generated base
- * snapshot. No regeneration, no reload — which is what makes it instant enough
- * to use mid-conversation.
+ * The generated base is untouched by design, so this drops the overlay rather
+ * than regenerating anything.
  */
 
 import { NextResponse } from 'next/server';
 
-import { clearNormsCache } from '@/lib/server/norms';
+import { runContext } from '@/lib/server/context';
+import { runHeader } from '@/lib/server/header';
 import { resetDemo } from '@/lib/server/planning-session';
-import { cockpitSummary } from '@/lib/server/projections';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST() {
-  const startedAt = performance.now();
+  const started = performance.now();
   resetDemo();
-  clearNormsCache();
-  const summary = cockpitSummary('baseline');
-  return NextResponse.json({ ...summary, resetMs: Math.round(performance.now() - startedAt) });
+  const header = runHeader(runContext('baseline'));
+  return NextResponse.json({ ...header, resetMs: Math.round(performance.now() - started) });
 }

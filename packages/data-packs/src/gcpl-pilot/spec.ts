@@ -206,7 +206,16 @@ export const HERO_PM = {
   shutdownWeeks: ['2026-09-21'] as const,
   minGapDays: 4,
 
-  openingStock: 260_000,
+  /**
+   * The plant opens the campaign holding more than its nominal ceiling.
+   *
+   * Not an error in the data — it is the situation. Empty bottles are almost
+   * all air, the last campaign over-delivered, and the floor is full. That is
+   * exactly why the volumetric ceiling and not the vendor turns out to be the
+   * binding constraint on the next six weeks, which is the finding the worked
+   * example exists to produce.
+   */
+  openingStock: 345_000,
   /** Six-week campaign — fixed-period lot sizing. */
   fixedPeriodDays: 42,
 
@@ -214,7 +223,9 @@ export const HERO_PM = {
    * Weekly gross requirement from W36, in pieces — the promotion build the
    * six-week campaign is sized against. Held flat after the promotion ends.
    */
-  weeklyRequirement: [128_000, 178_000, 208_000, 237_000, 237_000, 198_000, 178_000, 176_000] as const,
+  // The promotion starts in W37; this week carries only the tail of the last
+  // one, which is why the position entering the campaign is as full as it is.
+  weeklyRequirement: [18_000, 178_000, 208_000, 237_000, 237_000, 198_000, 178_000, 176_000] as const,
 
   observedTotalDays: [11, 9, 13, 10, 12, 10, 14, 10] as const,
 } as const;
@@ -548,7 +559,9 @@ export const PILOT_SPEC = {
     fgDailyRange: [1_800, 9_000] as const,
     fgStockDaysByClass: { A: [5, 8], B: [9, 14], C: [14, 22] } as const,
     sfgStockDaysRange: [7, 13] as const,
-    boughtStockDaysMultiplier: [0.7, 1.25] as const,
+    /** Bought-in cover against the maintained norm. A real book runs from
+     * thin to well over its own ceiling, and both ends are findings. */
+    boughtStockDaysMultiplier: [0.55, 1.7] as const,
   },
 } as const;
 

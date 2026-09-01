@@ -303,7 +303,7 @@ function heroChainBoms(soapFgIds: string[]): BomLine[] {
   lines.push(
     bom(CHAIN_ITEMS.noodle.itemId, PILOT_PLANT, CHAIN_ITEMS.blend.itemId, c.oilContent, {
       yieldPct: c.dfaStageYield,
-      label: 'Oil content of noodle, at the DFA-stage yield',
+      label: 'Oil content of the noodle',
     })
   );
 
@@ -312,11 +312,11 @@ function heroChainBoms(soapFgIds: string[]): BomLine[] {
   lines.push(
     bom(CHAIN_ITEMS.blend.itemId, PILOT_PLANT, HERO_RM.itemId, c.pfadBlendShare * c.importSourceShare, {
       yieldPct: c.conversionYield,
-      label: 'PFAD share of the blend, at the import share of the source split',
+      label: 'PFAD share of the blend, then the import side of the 60:40',
     }),
     bom(CHAIN_ITEMS.blend.itemId, PILOT_PLANT, HERO_RM_TWIN.itemId, c.pfadBlendShare * (1 - c.importSourceShare), {
       yieldPct: c.conversionYield,
-      label: 'PFAD share of the blend, at the local share of the source split',
+      label: 'PFAD share of the blend, then the local side of the 60:40',
     }),
     bom(CHAIN_ITEMS.blend.itemId, PILOT_PLANT, CHAIN_ITEMS.palmKernel.itemId, c.palmKernelBlendShare, {
       yieldPct: c.conversionYield,
@@ -1019,7 +1019,9 @@ function buildItemPlants(
         dailyReceivingCapacity: isBought ? Math.round(used.mean * rng.float(3, 9)) : null,
         maintainedStockDays: isBought ? stockDays : null,
         maintainedOrderDays: isBought ? stockDays : null,
-        maxNormDays: isBought ? Math.round(stockDays * 1.6) : null,
+        // The ceiling a max-min policy actually sets: a little above target,
+        // not half as much again.
+        maxNormDays: isBought ? Math.round(stockDays * 1.35) : null,
         campaignCycleDays: null,
       });
 
@@ -1238,7 +1240,13 @@ function buildSupply(
     const vendor = vendorFor.get(key);
 
     for (let index = 0; index < orders; index += 1) {
-      const dueInDays = Math.max(2, Math.round(((index + 1) / orders) * Math.max(leadTime, 6) * rng.float(0.6, 1.1)));
+      // Roughly one order in twelve is already past its date with nothing
+      // received against it. Any real open book carries these, and a control
+      // tower that reports none of them is reporting on a book nobody has.
+      const overdue = index === 0 && rng.chance(0.085);
+      const dueInDays = overdue
+        ? -rng.int(3, 24)
+        : Math.max(2, Math.round(((index + 1) / orders) * Math.max(leadTime, 6) * rng.float(0.6, 1.1)));
       const qty = Math.round(perOrder);
       if (qty <= 0) continue;
 
@@ -1255,7 +1263,7 @@ function buildSupply(
         sourcePlantId: null,
         isFirm: true,
         sourceSystem: 'SAP',
-        schedule: buildLines(rng, qty, dueInDays, releaseDate, isBought),
+        schedule: buildLines(rng, qty, dueInDays, releaseDate, isBought, overdue),
       });
     }
   }
@@ -1275,8 +1283,12 @@ function heroOpenOrder(): SupplyElement {
     line: spec.line,
     qty: spec.qty,
     plannedDate: spec.requestedDate,
-    confirmedDate: spec.confirmed ? addDays(spec.requestedDate, 4) : null,
-    expectedDate: spec.confirmed ? addDays(spec.requestedDate, 4) : spec.requestedDate,
+    // Acknowledged on the date it was asked for. The slip on this material is
+    // in its history, not in the line it is currently leaning on — and mixing
+    // the two would put a mid-week dip in front of the week the example is
+    // actually about.
+    confirmedDate: spec.confirmed ? spec.requestedDate : null,
+    expectedDate: spec.requestedDate,
     status: spec.confirmed ? 'CONFIRMED' : 'PLANNED',
     releasedOn: addDays(spec.requestedDate, -HERO_RM.maintainedLeadTimeDays),
     acknowledgedOn: spec.confirmed
@@ -1313,7 +1325,14 @@ function heroOpenOrder(): SupplyElement {
  * Roughly a third of lines carry no vendor acknowledgement, which is what makes
  * the control tower's opening figure a real measurement rather than a slogan.
  */
-function buildLines(rng: Rng, qty: number, dueInDays: number, releaseDate: string, isBought: boolean): DeliveryLine[] {
+function buildLines(
+  rng: Rng,
+  qty: number,
+  dueInDays: number,
+  releaseDate: string,
+  isBought: boolean,
+  overdue = false
+): DeliveryLine[] {
   const count = isBought ? rng.weighted([1, 2, 3], [0.45, 0.37, 0.18]) : 1;
   const per = Math.floor(qty / count);
   const lines: DeliveryLine[] = [];
@@ -1322,7 +1341,9 @@ function buildLines(rng: Rng, qty: number, dueInDays: number, releaseDate: strin
     const isLast = index === count - 1;
     const lineQty = isLast ? qty - per * (count - 1) : per;
     const offset = dueInDays - (count - 1 - index) * rng.int(5, 12);
-    const plannedDate = fromEpochDay(PLANNING_EPOCH + Math.max(1, offset));
+    // An overdue line keeps its date in the past. Pulling it forward to today
+    // is what makes a plan quietly count on supply that has not arrived.
+    const plannedDate = fromEpochDay(PLANNING_EPOCH + (overdue ? offset : Math.max(1, offset)));
 
     const acknowledged = isBought ? rng.chance(0.64) : true;
     const slip = acknowledged && rng.chance(0.24) ? rng.int(2, 11) : 0;
@@ -1409,9 +1430,16 @@ function buildReceiptHistory(
 
       const mean = isDrifted ? PACKAGING_DRIFT.observedLeadTimeMean : profile.meanLeadTimeDays;
       const stdDev = isDrifted ? PACKAGING_DRIFT.observedLeadTimeStdDev : profile.stdDevDays;
+      // Late-skewed, because supply is. A vessel can be a week late and cannot
+      // be a week early; a symmetric distribution would put half the book ahead
+      // of schedule and make the closed book meaningless.
       // Five days is the shortest total a four-interval split can carry and
       // still keep every boundary a day apart.
-      const total = Math.max(5, Math.round(rng.normal(mean, stdDev)));
+      // Floored just under the promise as well as skewed above it: a vendor
+      // rarely beats their own date by much, because a plant that cannot
+      // receive early turns the truck away.
+      const drawn = Math.round(rng.normal(mean + stdDev * 0.85, stdDev));
+      const total = Math.max(5, Math.round(mean - stdDev * 0.2), drawn);
 
       const receivedOffset = -rng.int(10, windowDays);
       const receivedOn = fromEpochDay(PLANNING_EPOCH + receivedOffset);
@@ -1427,7 +1455,12 @@ function buildReceiptHistory(
         vendorId: vendor.vendorId,
         poId: `${47_00000 + hashIndex(`${key}|hist|${index}`, 99_999)}`,
         orderedOn,
-        promisedOn: addDays(orderedOn, row.leadTimeDays ?? total),
+        // What the vendor committed to, which is not what the material master
+        // assumes. Measuring arrival against the maintained norm rather than
+        // against the promise reports a supplier as early whenever the norm is
+        // simply too long — which is the packaging block's whole problem, and
+        // an entirely different finding from a supplier being reliable.
+        promisedOn: addDays(orderedOn, Math.round(mean)),
         receivedOn: addDays(orderedOn, intervals.toGateIn),
         qty: Math.round(orderedQty * fill),
         orderedQty,
@@ -1577,4 +1610,202 @@ function hashIndex(label: string, modulo: number): number {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0) % Math.max(1, modulo);
+}
+
+// ---------------------------------------------------------------------------
+// Last week's run — what the drift panel diffs against
+// ---------------------------------------------------------------------------
+
+/**
+ * A single reason one material's position moved since the previous run.
+ *
+ * The direct answer to the parallel-spreadsheet problem. When a planner asks
+ * "why does this look different from Friday?", the system has to answer with a
+ * specific list of changes rather than a shrug — so the changes are modelled as
+ * facts, and the *previous snapshot* is derived by undoing them. The drift
+ * panel then compares two genuine planning runs rather than describing a
+ * difference it was told about.
+ */
+export interface PlanChange {
+  itemId: string;
+  plantId: string;
+  cause: 'DEMAND_CHANGED' | 'STOCK_CHANGED' | 'GRN_LANDED' | 'GRN_DID_NOT_LAND' | 'NORM_CHANGED' | 'PO_RESCHEDULED';
+  detail: string;
+}
+
+export const CHANGE_CAUSE_LABEL: Record<PlanChange['cause'], string> = {
+  DEMAND_CHANGED: 'Demand changed',
+  STOCK_CHANGED: 'Stock changed',
+  GRN_LANDED: 'A goods receipt landed',
+  GRN_DID_NOT_LAND: 'A goods receipt did not land',
+  NORM_CHANGED: 'A norm was changed',
+  PO_RESCHEDULED: 'A purchase order was rescheduled',
+};
+
+/**
+ * The snapshot as it stood at the previous run, with the changes that produced
+ * today's.
+ *
+ * Built by inverting each change against the current snapshot rather than by
+ * generating a second dataset: two independently generated datasets would
+ * differ everywhere, and a drift panel listing four hundred materials is a
+ * drift panel nobody reads.
+ */
+export function generatePreviousSnapshot(current: PlanningSnapshot): {
+  snapshot: PlanningSnapshot;
+  changes: PlanChange[];
+} {
+  const rng = streamFactory(SPEC.seed)('drift');
+  const changes: PlanChange[] = [];
+
+  const boughtKeys = current.itemPlants
+    .filter((row) => row.procurementType === 'BUY' && row.plantId === PILOT_PLANT)
+    .map((row) => `${row.itemId}@${row.plantId}`);
+  const picked = new Set<string>();
+  const pick = (): string | null => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const key = boughtKeys[rng.int(0, boughtKeys.length - 1)] as string;
+      if (!picked.has(key)) {
+        picked.add(key);
+        return key;
+      }
+    }
+    return null;
+  };
+
+  const demandChanged = new Map<string, number>();
+  const stockChanged = new Map<string, number>();
+  const normChanged = new Map<string, number>();
+  const rescheduled = new Map<string, number>();
+  const notLanded = new Set<string>();
+
+  for (let index = 0; index < 6; index += 1) {
+    const key = pick();
+    if (key) demandChanged.set(key, rng.float(0.82, 0.94));
+  }
+  for (let index = 0; index < 5; index += 1) {
+    const key = pick();
+    if (key) stockChanged.set(key, rng.float(1.06, 1.3));
+  }
+  for (let index = 0; index < 2; index += 1) {
+    const key = pick();
+    if (key) normChanged.set(key, rng.float(0.7, 0.88));
+  }
+
+  // The hero's own story: a purchase-order line that has since been pushed out.
+  // Last week the plan looked recoverable because that line sat two weeks
+  // earlier than it does now.
+  const heroKey = `${HERO_RM.itemId}@${HERO_RM.plantId}`;
+  rescheduled.set(heroKey, 14);
+  picked.add(heroKey);
+
+  for (let index = 0; index < 4; index += 1) {
+    const key = pick();
+    if (key) rescheduled.set(key, rng.int(4, 12));
+  }
+  for (let index = 0; index < 3; index += 1) {
+    const key = pick();
+    if (key) notLanded.add(key);
+  }
+
+  const nameOf = new Map(current.items.map((item) => [item.id, item.description]));
+
+  // ---- Demand: the previous run saw a smaller number ----------------------
+  const demand = current.demand.map((element) => {
+    const key = `${element.itemId}@${element.plantId}`;
+    const factor = demandChanged.get(key);
+    return factor === undefined ? element : { ...element, qty: Math.round(element.qty * factor) };
+  });
+  for (const [key, factor] of demandChanged) {
+    const [itemId, plantId] = key.split('@') as [string, string];
+    changes.push({
+      itemId,
+      plantId,
+      cause: 'DEMAND_CHANGED',
+      detail: `Requirement rose ${Math.round((1 / factor - 1) * 100)}% against last week's plan.`,
+    });
+  }
+
+  // ---- Stock: what was counted then, against what is counted now ----------
+  const stock = current.stock.map((position) => {
+    const key = `${position.itemId}@${position.plantId}`;
+    const factor = stockChanged.get(key);
+    return factor === undefined ? position : { ...position, unrestricted: Math.round(position.unrestricted * factor) };
+  });
+  for (const [key, factor] of stockChanged) {
+    const [itemId, plantId] = key.split('@') as [string, string];
+    changes.push({
+      itemId,
+      plantId,
+      cause: 'STOCK_CHANGED',
+      detail: `On-hand is ${Math.round((1 - 1 / factor) * 100)}% lower than the previous run counted.`,
+    });
+  }
+
+  // ---- Norms: a parameter somebody moved ----------------------------------
+  const itemPlants = current.itemPlants.map((row) => {
+    const key = `${row.itemId}@${row.plantId}`;
+    const factor = normChanged.get(key);
+    if (factor === undefined || row.safetyStock === null) return row;
+    return { ...row, safetyStock: Math.round(row.safetyStock * factor) };
+  });
+  for (const [key] of normChanged) {
+    const [itemId, plantId] = key.split('@') as [string, string];
+    changes.push({ itemId, plantId, cause: 'NORM_CHANGED', detail: 'Safety stock was raised since the last run.' });
+  }
+
+  // ---- Supply: lines pushed out, and receipts that never arrived ----------
+  const supply = current.supply.map((element) => {
+    const key = `${element.itemId}@${element.plantId}`;
+    const pushedBy = rescheduled.get(key);
+    const missing = notLanded.has(key);
+    if (pushedBy === undefined && !missing) return element;
+    if (!element.schedule || element.schedule.length === 0) return element;
+
+    const schedule = element.schedule.map((line, index) => {
+      // The previous run saw the last line earlier than it now sits.
+      if (pushedBy !== undefined && index === element.schedule!.length - 1) {
+        const earlier = addDays(line.expectedDate, -pushedBy);
+        return {
+          ...line,
+          plannedDate: earlier,
+          expectedDate: earlier,
+          confirmedDate: line.confirmedDate ? earlier : null,
+        };
+      }
+      // And it expected a receipt that has since failed to arrive.
+      if (missing && index === 0 && line.status !== 'RECEIVED') {
+        return {
+          ...line,
+          status: 'CONFIRMED' as const,
+          expectedDate: line.plannedDate,
+          confirmedDate: line.plannedDate,
+        };
+      }
+      return line;
+    });
+    return { ...element, schedule };
+  });
+
+  for (const [key, days] of rescheduled) {
+    const [itemId, plantId] = key.split('@') as [string, string];
+    changes.push({
+      itemId,
+      plantId,
+      cause: 'PO_RESCHEDULED',
+      detail: `A delivery line moved out ${days} days since the previous run.`,
+    });
+  }
+  for (const key of notLanded) {
+    const [itemId, plantId] = key.split('@') as [string, string];
+    changes.push({
+      itemId,
+      plantId,
+      cause: 'GRN_DID_NOT_LAND',
+      detail: `A receipt the previous run counted on has still not arrived.`,
+    });
+  }
+
+  void nameOf;
+  return { snapshot: { ...current, demand, stock, supply, itemPlants }, changes };
 }

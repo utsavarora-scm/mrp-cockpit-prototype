@@ -101,6 +101,23 @@ export class WorkingCalendar {
   }
 
   /** Working days in the inclusive range — used for capacity and coverage checks. */
+  /**
+   * The last day on or before this one that the site is open.
+   *
+   * Used for a release date: a purchase order raised on a Sunday is a purchase
+   * order raised on Monday, and dating it to the Sunday quietly gives the
+   * planner a day they do not have.
+   */
+  previousWorkingDayOnOrBefore(epochDay: number): number {
+    let day = epochDay;
+    let guard = 0;
+    while (!this.isWorkingDay(day) && guard < 400) {
+      day -= 1;
+      guard += 1;
+    }
+    return day;
+  }
+
   countWorkingDaysBetween(fromEpochDay: number, toEpochDayInclusive: number): number {
     if (toEpochDayInclusive < fromEpochDay) return 0;
     const hi = this.countAtOrBefore[this.index(toEpochDayInclusive)] as number;

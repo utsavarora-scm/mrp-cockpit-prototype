@@ -187,9 +187,11 @@ export function computeFences(input: FenceInput): FenceSet {
 
 function fenceFor(input: FenceInput, totalDays: number): Fence {
   const rounded = Math.max(0, Math.round(totalDays));
-  // Walked over working days: a lead time that lands mid-shutdown is not a
-  // lead time, and naive date arithmetic lands receipts on Sundays.
-  const receiptEpochDay = input.calendar.addWorkingDays(input.planningEpochDay, rounded);
+  // A procurement lead time is calendar days — a vessel sails through the
+  // weekend and a customs queue does not observe one. The resulting date is
+  // then snapped forward to a day the plant can actually receive on, because a
+  // delivery scheduled into a shutdown is a delivery turned away at the gate.
+  const receiptEpochDay = input.calendar.nextWorkingDayOnOrAfter(input.planningEpochDay + rounded);
   const earliestReceiptDay = receiptEpochDay - input.planningEpochDay;
   return {
     totalDays: rounded,

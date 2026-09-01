@@ -1,42 +1,21 @@
 /**
  * The shapes the browser actually receives.
  *
- * Deliberately narrow. The plan holds typed arrays, graph indexes and the whole
- * snapshot; none of that crosses the wire. Every screen reads a projection sized
- * for what it draws.
- */
-
-import type { DeliveryStatus, SupplyType } from '@repo/domain';
-
-/**
- * The planning position in six numbers.
+ * Deliberately narrow. A run holds typed arrays, graph indexes and the whole
+ * snapshot; none of that crosses the wire. Every screen reads a projection
+ * sized for what it draws.
  *
- * Deliberately counts of materials and orders rather than money: this is the
- * "how does the plan stand" question, which a planner asks before the "what is
- * it worth" question the exposure tiles answer.
+ * One convention runs through all of it: **nothing appears without a unit and a
+ * date.** A field carrying a quantity carries the unit beside it, and a field
+ * carrying a bucket carries the week it falls in. "800" is not information.
  */
-export interface PlanningPosition {
-  /** Item-plants the engine actually planned. */
-  mrpMaterials: number;
-  /** Those carrying at least one open exception. */
-  atRisk: number;
-  /** Those whose orderable-supply balance goes negative inside the horizon. */
-  projectedStockouts: number;
-  /** Those holding materially more than the horizon needs. */
-  excessMaterials: number;
-  openPos: number;
-  /** Delivery lines the supplier has already pushed past the date the plan uses. */
-  delayedInbound: number;
-  /** Share of committed demand the plan covers, and the buffers behind it. */
-  coverage: {
-    inventory: number;
-    demand: number;
-    supply: number;
-    safetyStock: number;
-  };
-}
 
-/** A plant the top-bar filter can scope to. */
+import type { ActionGroup, ExceptionCode, Severity } from '@repo/planning-engine';
+
+// ---------------------------------------------------------------------------
+// Shared
+// ---------------------------------------------------------------------------
+
 export interface PlantOption {
   id: string;
   name: string;
@@ -44,248 +23,180 @@ export interface PlantOption {
 }
 
 /**
- * One segment of the gap-attribution bar.
+ * The run header, on every screen.
  *
- * The cockpit's second question, after "how big is it": *what kind of problem
- * is it?* Money that needs a purchase order raising is a different job from
- * money already ordered and arriving late, which is different again from stock
- * that exists but is at the wrong plant.
+ * Not administrative hygiene. When a planner asks why a number differs from
+ * Friday's, the first thing they need is confirmation that they are looking at
+ * a different run — so every screen states which one it is looking at.
  */
-export interface GapSegment {
-  kind: 'NEEDS_PO' | 'ARRIVING_LATE' | 'WRONG_PLANT';
-  label: string;
-  value: number;
-  /** 0–1 of the total gap. */
-  share: number;
-  materials: number;
+export interface RunHeader {
+  planningDate: string;
+  /** ISO week of the planning date — `W36`. */
+  planningWeek: string;
+  runType: string;
+  mpsVersion: string;
+  category: string;
+  pilotPlantId: string;
+  horizonDays: number;
+  /** Item-plants the engine actually planned. */
+  materialsPlanned: number;
+  elapsedMs: number;
+  plants: PlantOption[];
 }
 
-/** One row of the cockpit's needs-attention list, ranked by money at stake. */
-export interface AttentionRow {
+/** A supply confidence tier, as the browser reads it. */
+export interface TierView {
+  tier: 1 | 2 | 3;
+  label: string;
+  fill: 'SOLID' | 'OUTLINE' | 'HATCHED';
+}
+
+// ---------------------------------------------------------------------------
+// Screen 1 — Planning Position
+// ---------------------------------------------------------------------------
+
+/** A tile is a filter, not a decoration. `filter` is what it scopes the table to. */
+export interface PositionTile {
+  key: 'PLANNED' | 'STOCKOUTS' | 'BREACHES' | 'UNREACHABLE' | 'UNCONFIRMED' | 'EXCESS';
+  label: string;
+  count: number;
+  note: string;
+}
+
+/**
+ * One row of the drift panel — a material whose position moved since the
+ * previous run, with the cause attributed.
+ */
+export interface DriftRow {
   itemId: string;
   plantId: string;
   description: string;
   baseUom: string;
-  /** Plain language, no jargon and no exception codes. */
-  issue: string;
-  /** Days until the position actually bites. Null when it already has. */
-  daysToImpact: number | null;
-  valueAtStake: number;
-  /** What a planner would do next, in one line. */
-  nextStep: string;
+  cause: string;
+  causeLabel: string;
+  detail: string;
+  /** Days of cover at the previous run and at this one. */
+  coverBefore: number;
+  coverAfter: number;
+  /** Positive means cover was lost. */
+  coverLost: number;
+  breachBefore: string | null;
+  breachAfter: string | null;
 }
 
-/** The norms half of the cockpit — the 0:00 beat. */
-export interface NormsSummary {
-  excessCapital: number;
-  unprotectedExposure: number;
-  materialsWithRecommendation: number;
-  materialsInExcess: number;
-  materialsBelowNorm: number;
-  /** Total demand covered by the maintained norms, 0–1. */
-  coverageAgainstNorm: number;
-  elapsedMs: number;
-}
-
-export interface CockpitSummary {
-  scenarioId: string;
-  planningDate: string;
-  horizonDays: number;
-  /** Plants in the active pack, for the top-bar filter. */
-  plants: PlantOption[];
-  norms: NormsSummary;
-  gapAttribution: GapSegment[];
-  needsAttention: AttentionRow[];
-  /** Wall-clock milliseconds of the run behind this summary. */
-  elapsedMs: number;
-  planningPosition: PlanningPosition;
-}
-
-/**
- * One row of the materials table — the planning position for a single
- * item-plant, in the terms the planner reads first.
- */
-export interface MaterialRow {
+export interface PositionRow {
   itemId: string;
   plantId: string;
   description: string;
   itemType: string;
   baseUom: string;
   abcClass: string;
-  plannerCode: string | null;
-  /** Gross requirements across the horizon. */
-  demand: number;
-  /** Unrestricted stock on hand. */
-  stock: number;
-  /** Open order quantity still to arrive. */
-  openPo: number;
-  /** The part of that open quantity the supplier has confirmed or shipped. */
-  expectedInbound: number;
-  safetyStock: number;
-  /** Closing balance on orderable supply — the honest one. */
-  projectedBalance: number;
-  /** The worst balance across the horizon, which is where the trouble is. */
-  lowestBalance: number;
-  /** First date the orderable balance goes negative. */
-  stockoutDate: string | null;
-  status: 'HEALTHY' | 'WATCH' | 'AT_RISK' | 'EXCESS';
-  /** Money the projected shortfall puts at stake, at standard cost. */
-  exposure: number;
+  /** First date the honest balance falls below safety stock. */
+  firstBreachDate: string | null;
+  firstBreachWeek: string | null;
+  /** Days until that breach. Null when there is none inside the horizon. */
+  daysToBreach: number | null;
+  daysOfCover: number;
+  qtyAtRisk: number;
+  valueAtRisk: number;
+  /** The next receipt, and how much anybody has actually agreed to it. */
+  nextReceipt: { date: string; week: string; qty: number; tier: TierView } | null;
+  status: 'STOCK_OUT' | 'BREACH' | 'UNREACHABLE' | 'EXCESS' | 'OK';
+  statusLabel: string;
+  /** True when no order placed today can reach the exposure. */
+  reachableByOrdering: boolean;
 }
 
-export interface MaterialsQueryResult {
-  rows: MaterialRow[];
+export interface PlanningPosition {
+  header: RunHeader;
+  tiles: PositionTile[];
+  drift: DriftRow[];
+  rows: PositionRow[];
   total: number;
-  counts: { all: number; atRisk: number; watch: number; excess: number; healthy: number };
 }
 
-export interface ParameterHealth {
-  field: string;
+// ---------------------------------------------------------------------------
+// Screen 2 — Material Workbench
+// ---------------------------------------------------------------------------
+
+/** One bucket of the projection chart, with everything drawn at that x. */
+export interface ChartBucket {
+  index: number;
   label: string;
-  maintained: string;
-  observed: string | null;
-  status: 'FRESH' | 'DRIFTED' | 'MISSING';
+  week: string;
+  kind: 'DAY' | 'WEEK' | 'MONTH';
+  zone: 'EXECUTION' | 'SCHEDULING' | 'PROCUREMENT' | 'STRATEGIC';
+  /** True on the first bucket of a zone — where the axis draws a boundary. */
+  startsZone: boolean;
+  startDate: string;
+  endDate: string;
+  demand: number;
+  /** Supply, split by how much anybody has actually agreed to it. */
+  confirmed: number;
+  committed: number;
+  planned: number;
+  /** Quantity clearing quality inspection in this bucket. */
+  qaRelease: number;
+  /** The honest position: stock and existing orders, nothing proposed. */
+  balanceBeforePlanned: number;
+  /** The same, counting only supply somebody has acknowledged. */
+  balanceConfirmedOnly: number;
+  /** The plan, if everything proposed is actually done. */
+  balanceAfterPlanned: number;
+  safetyStock: number;
+  maxNorm: number | null;
+  daysOfCover: number;
+  /** Against the maintained fence. */
+  fenceZone: 'FROZEN' | 'FIRM' | 'FREE';
+  status: 'OK' | 'TIGHT' | 'BREACH' | 'STOCK_OUT' | 'EXCESS';
+}
+
+/** One row of the classic planning grid. Fixed order, every cell explainable. */
+export interface GridRow {
+  key: string;
+  label: string;
+  /** Sub-rows are indented under the row they decompose. */
+  indent: 0 | 1;
+  values: number[];
+  /** How the row collapses when days are bucketed into weeks. */
+  aggregate: 'SUM' | 'LAST';
+  emphasis: 'BALANCE' | 'THRESHOLD' | 'ANSWER' | 'NONE';
+  /** Flags a cell red where the value is a date in the past, not a quantity. */
+  tone: 'NEUTRAL' | 'NEGATIVE_IS_BAD' | 'PAST_IS_BAD';
   note: string | null;
 }
 
-export interface TimePhasedRow {
+/** One interval of the lead-time chain, with the function that owns it. */
+export interface ChainIntervalView {
   key: string;
   label: string;
-  /** One value per day. */
-  values: number[];
-  /** Rows the UI can expand into, e.g. gross requirements by demand type. */
-  children?: TimePhasedRow[];
-  editable?: boolean;
-  emphasis?: 'BALANCE' | 'THRESHOLD' | 'NONE';
-  /**
-   * How the row collapses when days are bucketed into weeks or periods.
-   *
-   * A flow (what moved) sums; a level (what is held at an instant) takes the
-   * closing value. Getting this wrong is not a rounding difference — summing a
-   * stock balance over a week reports seven times the stock.
-   */
-  aggregate: 'SUM' | 'LAST';
+  days: number;
+  owner: string;
+  note: string;
 }
 
-export interface DeliveryLineView {
-  line: number;
-  qty: number;
-  plannedDate: string;
-  confirmedDate: string | null;
-  expectedDate: string;
-  status: DeliveryStatus;
-  /** Days the confirmed date sits after the planned one. Zero when on schedule. */
-  slipDays: number;
+export interface FenceView {
+  totalDays: number;
+  earliestReceiptDate: string;
+  earliestReceiptWeek: string;
+  earliestReceiptBucket: number;
 }
 
-/**
- * An open order as the schedule screen shows it: the total, and the drops it
- * actually arrives in.
- */
-export interface PurchaseOrderView {
-  id: string;
-  type: SupplyType;
-  vendorId: string | null;
-  vendorName: string | null;
-  totalQty: number;
-  dueDate: string;
-  isFirm: boolean;
-  sourceSystem: string;
-  lines: DeliveryLineView[];
-  /** Quantity confirmed, in transit or received — supply that is genuinely coming. */
-  confirmedQty: number;
-  /** Quantity with no supplier commitment behind it. */
-  unconfirmedQty: number;
-  /** Worst slip across the lines, in days. */
-  worstSlipDays: number;
+export interface ParameterView {
+  field: string;
+  label: string;
+  maintained: string;
+  measured: string | null;
+  status: 'FRESH' | 'DRIFTED' | 'MISSING' | 'STALE';
+  /** Source system, field, and when it was last touched. */
+  source: string;
+  lastChangedOn: string;
+  note: string | null;
+  /** True where the planner may override it from this screen. */
+  editable: boolean;
 }
 
-/**
- * The working behind a recommended order, in the order a planner reads it.
- *
- * Two nested subtractions: order-up-to less effective stock gives the net
- * requirement, and effective stock is itself on-hand plus confirmed inbound
- * less what is already committed. Everything here comes from the run that
- * produced the recommendation, never from a recalculation.
- */
-export interface MrpExplain {
-  recommendedQty: number;
-  /** What lot sizing asked for before MOQ and rounding — shown when it differs. */
-  ruleQty: number;
-  orderUpToLevel: number;
-  netRequirement: number;
-  effectiveStock: {
-    onHand: number;
-    /** Receipts the netting walk counted before the bucket that breached. */
-    inbound: number;
-    commitments: number;
-    /** Equals onHand + inbound − commitments, and is the engine's own balance. */
-    total: number;
-    /**
-     * The part of `inbound` no supplier has committed to a date for. Not a term
-     * in the subtraction — a caveat on it. The plan is netting against this
-     * quantity as though it were certain, and it is not.
-     */
-    unconfirmedInbound: number;
-  };
-  assumptions: {
-    averageDailyDemand: number;
-    safetyStock: number;
-    inventoryNorm: number;
-    leadTimeDays: number;
-    observedLeadTimeDays: number | null;
-    lotSizeRule: string | null;
-    moq: number | null;
-  };
-  receiptDate: string;
-  releaseDate: string;
-  /** True when the release date has already passed — the order cannot be placed in time. */
-  isReleaseInPast: boolean;
-  totalOffsetDays: number;
-}
-
-/** One goods receipt, as the Explain drawer lists it. */
-export interface LeadTimeReceipt {
-  poId: string;
-  vendorId: string;
-  vendorName: string | null;
-  orderedOn: string;
-  promisedOn: string;
-  receivedOn: string;
-  qty: number;
-  actualLeadTimeDays: number;
-}
-
-/**
- * What the observed lead time is reconstructed from.
- *
- * The drawer's second level: a planner who does not believe the number clicks
- * once more and reads the receipts it was averaged over. Unmatched receipts are
- * counted and named as excluded rather than quietly dropped — a figure that
- * hides its own exclusions is the kind that loses an audience.
- */
-export interface LeadTimeEvidence {
-  maintainedDays: number | null;
-  observedMeanDays: number | null;
-  observedStdDevDays: number | null;
-  matchedCount: number;
-  unmatchedCount: number;
-  /** The matched receipts, most recent first. */
-  receipts: LeadTimeReceipt[];
-  paramsLastChangedOn: string;
-  /** Where the maintained value lives in the system of record. */
-  maintainedSource: string;
-}
-
-/**
- * One approved source for a material, and the share of volume it carries.
- *
- * The allocation share is what the scheduling engine splits an order across in
- * Checkpoint B, so it is worth showing here rather than inventing later: a
- * planner who can see 60/40 on the screen is not surprised when the schedule
- * splits 60/40.
- */
-export interface VendorSplit {
+export interface VendorSplitView {
   vendorId: string;
   vendorName: string | null;
   isPrimary: boolean;
@@ -293,209 +204,462 @@ export interface VendorSplit {
   allocationShare: number;
   leadTimeDays: number;
   isImport: boolean;
+  weeklyCapacity: number | null;
+  shutdownWeeks: string[];
 }
 
-/** One constraint that shaped a norm or a delivery split. */
-export interface ConstraintView {
-  kind: string;
-  label: string;
-  binding: boolean;
-  value: string;
-  note: string;
-}
-
-/** One row of the Norm Review table, with everything its expansion needs. */
-export interface NormRow {
+export interface MaterialDetail {
+  header: RunHeader;
   itemId: string;
   plantId: string;
-  description: string;
-  baseUom: string;
-  abcClass: string;
-  vendorId: string | null;
-  vendorName: string | null;
-  isImport: boolean;
-  paramsLastChangedOn: string;
-
-  maintainedOrderDays: number | null;
-  recommendedOrderDays: number;
-  maintainedStockDays: number | null;
-  recommendedStockDays: number;
-  /** recommended − maintained, in stock days. */
-  stockDaysGap: number | null;
-
-  maintainedQty: number | null;
-  recommendedQty: number;
-  /** Positive = excess capital, negative = unprotected exposure. */
-  valueImpact: number;
-  direction: 'EXCESS' | 'EXPOSURE';
-  confidence: 'HIGH' | 'LOW';
-
-  /** The working, for the row expansion. */
-  calculation: {
-    z: number;
-    serviceLevel: number;
-    dailyDemandMean: number;
-    dailyDemandStdDev: number;
-    leadTimeMean: number;
-    leadTimeStdDev: number;
-    demandTerm: number;
-    leadTimeTerm: number;
-    leadTimeShare: number;
-    naiveQty: number;
-    combinedQty: number;
-    ratio: number;
-  };
-  constraints: ConstraintView[];
-  /** Observed lead times, for the histogram. */
-  observations: number[];
-  receipts: LeadTimeReceipt[];
-  unmatchedCount: number;
-}
-
-export interface NormsQueryResult {
-  rows: NormRow[];
-  total: number;
-  excessCapital: number;
-  unprotectedExposure: number;
-  elapsedMs: number;
-  vendors: Array<{ id: string; name: string }>;
-}
-
-/** One delivery line of a generated schedule. */
-export interface ScheduleLineView {
-  line: number;
-  qty: number;
-  requiredByDate: string;
-  requestedDispatchDate: string;
-  coverDays: number;
-  /** 0–1, from the vendor's own delivery history. */
-  confidence: number;
-  flags: string[];
-  /** Days the line is needed before the vendor can physically dispatch it. */
-  infeasibleByDays: number;
-  status: 'PLANNED' | 'CONFIRMED' | 'IN_TRANSIT' | 'RECEIVED' | 'DELAYED';
-}
-
-/** A generated purchase schedule, with the constraints that produced it. */
-export interface ScheduleView {
-  orderId: string;
-  /** True when this is an order the plan is recommending, not one placed. */
-  isPlanned: boolean;
-  itemId: string;
-  plantId: string;
-  description: string;
-  baseUom: string;
-  vendorId: string | null;
-  vendorName: string | null;
-  isImport: boolean;
-  planningDate: string;
-  totalQty: number;
-  /** Where the total came from — shown so the quantity is never just asserted. */
-  derivation: {
-    orderWindowDays: number;
-    demandInWindow: number;
-    targetClosing: number;
-    openingStock: number;
-    committedInWindow: number;
-    derivedTotal: number;
-    isOverridden: boolean;
-  };
-  lineCount: number;
-  lines: ScheduleLineView[];
-  constraints: ConstraintView[];
-  rationale: string;
-  peakOnHand: number;
-  storageCapacity: number | null;
-  infeasibleLines: number;
-  horizonEndDate: string;
-}
-
-/** The planning position for one material, for the detail header. */
-export interface ItemPosition {
-  demand: number;
-  openPo: number;
-  expectedInbound: number;
-  plannedReceipts: number;
-  projectedBalance: number;
-  lowestBalance: number;
-  stockoutDate: string | null;
-  /** Negative = shortfall against the buffer, positive = cover above it. */
-  shortfall: number;
-}
-
-export interface ItemDetail {
-  itemId: string;
-  plantId: string;
-  /** The fixed planning date this view was computed against. */
-  planningDate: string;
-  horizonDays: number;
   description: string;
   itemType: string;
   baseUom: string;
   abcClass: string;
-  xyzClass: string;
+  itemCategoryId: string | null;
   standardCost: number;
   plannerCode: string | null;
-  procurementType: string | null;
   lowLevelCode: number;
+
   stock: { unrestricted: number; blocked: number; qualityInspection: number; inTransit: number };
+  quarantine: Array<{ batchId: string; qty: number; receivedOn: string; expectedReleaseDate: string }>;
   safetyStock: number;
-  /** ISO date the planning parameters were last maintained. */
-  paramsLastChangedOn: string;
-  /** Bucket dates, aligned with every series below. */
-  dates: string[];
-  grossRequirements: number[];
-  scheduledReceipts: number[];
-  plannedReceipts: number[];
-  /** Receipts a supplier has acknowledged, or that are already in transit. */
-  confirmedReceipts: number[];
-  /** Order lines with no supplier commitment behind them yet. */
-  unconfirmedReceipts: number[];
-  /**
-   * Balance counting only confirmed supply — the honest one.
-   *
-   * Kept separate from `balanceWithPlanned` throughout. Merging them is the
-   * "rosy picture" the buyer warned about, so the chart draws two lines and
-   * never one.
-   */
-  balanceConfirmed: number[];
-  /** Balance including unconfirmed order lines and engine-planned orders. */
-  balanceWithPlanned: number[];
-  projectedAvailable: number[];
-  projectedAvailableFeasible: number[];
-  daysOfCover: number[];
-  grid: TimePhasedRow[];
-  parameters: ParameterHealth[];
-  leadTime: LeadTimeEvidence;
-  vendors: VendorSplit[];
-  /** Null where there is not enough receipt history to carry a recommendation. */
-  norm: NormRow | null;
-  /** The order the plan recommends, as a schedule. Null when it recommends none. */
-  plannedOrderId: string | null;
-  healthScore: number;
-  position: ItemPosition;
-  purchaseOrders: PurchaseOrderView[];
-  /** Null when the plan is not recommending anything for this item-plant. */
-  recommendation: MrpExplain | null;
+  maxNorm: number | null;
+
+  buckets: ChartBucket[];
+  grid: GridRow[];
+
+  chain: ChainIntervalView[];
+  fences: { maintained: FenceView; measured: FenceView | null; driftDays: number | null };
+  parameters: ParameterView[];
+  vendors: VendorSplitView[];
+
+  firstBreachDate: string | null;
+  firstStockoutDate: string | null;
+  daysOfCoverToday: number;
+
+  /** The order the plan recommends, where it recommends one. */
+  recommendation: RecommendationView | null;
+  /** Open orders, with their delivery lines. */
+  orders: OrderView[];
+  /** Exceptions on this material, ranked. */
+  exceptions: ExceptionView[];
 }
 
-/**
- * A parameter override weighed before it is applied: the same recommendation,
- * computed on the current value and on the proposed one.
- */
-export interface OverridePreview {
+/** What the plan proposes, and whether it can still be placed. */
+export interface RecommendationView {
+  qty: number;
+  /** What the requirement alone asked for, before any rule. */
+  netRequirement: number;
+  /** What the rules added on top of it. */
+  lotSizingAddition: number;
+  receiptDate: string;
+  receiptWeek: string;
+  releaseDate: string;
+  releaseWeek: string;
+  isReleaseInPast: boolean;
+  /** How many weeks the release date has already passed by. */
+  weeksLate: number;
+  leadTimeDays: number;
+}
+
+// ---------------------------------------------------------------------------
+// Screen 5 — Explain
+// ---------------------------------------------------------------------------
+
+/** One line of the arithmetic. Every operand carries its own provenance. */
+export interface ExplainLine {
+  label: string;
+  value: number | null;
+  uom: string;
+  /** `+`, `−`, `=`, or blank for a heading. */
+  operator: '' | '+' | '−' | '×' | '÷' | '=';
+  source: string | null;
+  emphasis: boolean;
+  /** True where the operand itself expands into its own calculation. */
+  expandable: boolean;
+}
+
+/** One step of the walk back up the bill of material to a number people know. */
+export interface ChainStep {
+  label: string;
+  factorLabel: string;
+  /** The multiplier or divisor applied at this step. */
+  factor: number;
+  operator: '×' | '÷';
+  /** A decision somebody made, or a property of the process. They differ. */
+  kind: 'DECISION' | 'PROCESS';
+  resultQty: number;
+  uom: string;
+  itemId: string;
+}
+
+export interface ProvenanceRow {
+  field: string;
+  value: string;
+  system: string;
+  lastChangedOn: string;
+  /** Days since it was last touched. Master data set once is a fact worth seeing. */
+  ageDays: number;
+}
+
+export interface ExplainPayload {
+  itemId: string;
+  plantId: string;
+  /** One sentence, before any table. Deterministic — the same numbers always
+   * produce the same sentence. A generated narrative that cannot be reproduced
+   * is the opposite of a trust layer. */
+  sentence: string;
+  arithmetic: ExplainLine[];
+  /** Where the requirement came from, factor by factor. */
+  chain: ChainStep[];
+  provenance: ProvenanceRow[];
+  /** The other material codes carrying the same chemistry. */
+  categoryCheck: Array<{
+    itemId: string;
+    description: string;
+    leadTimeDays: number;
+    earliestReceiptDate: string;
+    earliestReceiptWeek: string;
+    reachesTheBreach: boolean;
+  }>;
+  /** The other components of the same parent, and whether they can move. */
+  horizontalCheck: Array<{
+    itemId: string;
+    description: string;
+    parentItemId: string;
+    firstBreachDate: string | null;
+    blocked: boolean;
+  }>;
+  /** Maintained against measured, with the receipts behind the measurement. */
+  realityCheck: {
+    maintainedDays: number | null;
+    measuredDays: number | null;
+    stdDevDays: number | null;
+    matchedCount: number;
+    unmatchedCount: number;
+    receipts: ReceiptView[];
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Screen 3 — Supply Timeline & PO Schedule Builder
+// ---------------------------------------------------------------------------
+
+export interface DeliveryLineView {
+  orderId: string;
+  line: number;
+  qty: number;
+  requestedDate: string;
+  requestedWeek: string;
+  committedDate: string | null;
+  expectedDate: string;
+  expectedWeek: string;
+  tier: TierView;
+  stage: string;
+  /** Days the expected date sits after the requested one. */
+  slipDays: number;
+  /** That slip, in days of cover — five days on a fast mover is not five on a slow one. */
+  coverLostDays: number;
+  reasonCode: string | null;
+  reasonLabel: string | null;
+  note: string | null;
+  grnDate: string | null;
+  grnQty: number | null;
+  qaReleasedOn: string | null;
+  editable: boolean;
+}
+
+export interface OrderView {
+  id: string;
+  vendorId: string | null;
+  vendorName: string | null;
+  totalQty: number;
+  /** Quantity somebody has acknowledged, and quantity nobody has. */
+  confirmedQty: number;
+  unconfirmedQty: number;
+  lines: DeliveryLineView[];
+}
+
+export interface ScheduleLineView {
+  line: number;
+  week: string;
+  date: string;
+  dispatchDate: string;
+  /** What the requirement alone asked for. */
+  requirement: number;
+  needQty: number;
+  lotSizingAddition: number;
+  idealQty: number;
+  committedQty: number;
+  delta: number;
+  balanceAfter: number;
+  constraint: string | null;
+  constraintLabel: string | null;
+  note: string;
+  insideFence: boolean;
+  unreachableByDays: number;
+}
+
+export interface ConstraintView {
+  key: string;
+  label: string;
+  binding: boolean;
+  value: number | null;
+  note: string;
+}
+
+export interface ScheduleBuilderView {
+  header: RunHeader;
+  itemId: string;
+  plantId: string;
+  description: string;
+  baseUom: string;
+  vendorId: string | null;
+  vendorName: string | null;
+  safetyStock: number;
+  openingBalance: number;
+  /** The window the schedule covers, and why it is that long. */
+  window: { fromDate: string; toDate: string; fromWeek: string; toWeek: string; days: number; reason: string };
+  lines: ScheduleLineView[];
+  totals: { ideal: number; committed: number; delta: number };
+  constraints: ConstraintView[];
+  /** The delta ledger, as prose, in the order a planner reads it. */
+  ledger: string[];
+  /** Ways to close the residual. Only levers the constraint set supports. */
+  options: string[];
+  residual: {
+    weeks: string[];
+    shortfall: number;
+    shortfallDays: number;
+    recoveredIn: string | null;
+    stocksOut: boolean;
+  } | null;
+  /** The inbound timeline — every open order on this material. */
+  orders: OrderView[];
+  fence: FenceView;
+}
+
+// ---------------------------------------------------------------------------
+// Screen 4 — Adherence
+// ---------------------------------------------------------------------------
+
+export interface ReceiptView {
+  poId: string;
+  vendorId: string;
+  vendorName: string | null;
+  orderedOn: string;
+  promisedOn: string;
+  acknowledgedOn: string | null;
+  dispatchedOn: string | null;
+  receivedOn: string;
+  qaReleasedOn: string | null;
+  orderedQty: number;
+  qty: number;
+  /** qty ÷ orderedQty. */
+  fillRate: number;
+  totalDays: number;
+  /** Against the maintained chain. */
+  deviationDays: number;
+  reasonCode: string | null;
+  reasonLabel: string | null;
+  matched: boolean;
+}
+
+/** One interval of a receipt's slip, and whose it is. */
+export interface IntervalSlip {
+  key: string;
+  label: string;
+  owner: string;
+  maintainedDays: number;
+  actualDays: number;
+  slipDays: number;
+}
+
+/** A distribution rather than an average — 104 reliable is not 104 as a coin toss. */
+export interface Distribution {
+  count: number;
+  meanDays: number;
+  medianDays: number;
+  stdDevDays: number;
+  minDays: number;
+  maxDays: number;
+  /** Histogram buckets, for drawing the spread. */
+  buckets: Array<{ from: number; to: number; count: number }>;
+}
+
+export interface AdherenceLineView {
+  itemId: string;
+  plantId: string;
+  description: string;
+  baseUom: string;
+  poId: string;
+  line: number;
+  requestedDate: string;
+  committedDate: string | null;
+  grnDate: string | null;
+  qaReleasedOn: string | null;
+  requestedQty: number;
+  committedQty: number | null;
+  receivedQty: number | null;
+  fillRate: number | null;
+  deviationDays: number | null;
+  reasonCode: string | null;
+  reasonLabel: string | null;
+  intervals: IntervalSlip[];
+}
+
+export interface AdherenceByMaterial {
+  itemId: string;
+  plantId: string;
+  description: string;
+  baseUom: string;
+  maintainedDays: number | null;
+  distribution: Distribution;
+  fillRate: number;
+  /** measured − maintained. */
+  driftDays: number | null;
+  intervals: IntervalSlip[];
+}
+
+export interface AdherenceByVendor {
+  vendorId: string;
+  vendorName: string;
+  materials: number;
+  distribution: Distribution;
+  fillRate: number;
+  onTimeRate: number;
+  /** Value the vendor currently holds in the open book. */
+  openBookValue: number;
+  intervals: IntervalSlip[];
+}
+
+export interface AdherenceView {
+  header: RunHeader;
+  lines: AdherenceLineView[];
+  byMaterial: AdherenceByMaterial[];
+  byVendor: AdherenceByVendor[];
+  reasonCodes: Array<{ code: string; label: string; owner: string; count: number }>;
+  /** What this screen deliberately does not do, stated on it. */
+  boundary: string;
+}
+
+// ---------------------------------------------------------------------------
+// Screen 6 — Exception Queue
+// ---------------------------------------------------------------------------
+
+export interface ExceptionView {
+  id: string;
+  code: ExceptionCode;
+  group: ActionGroup;
+  groupLabel: string;
+  severity: Severity;
+  itemId: string;
+  plantId: string;
+  description: string;
+  baseUom: string;
+  headline: string;
+  biteDate: string;
+  biteWeek: string;
+  daysToBite: number;
+  qtyAtStake: number;
+  daysAtStake: number;
+  valueAtStake: number;
+  reachableByOrdering: boolean;
+  operands: Array<{ label: string; value: number; source: string }>;
+  actions: string[];
+  dismissed: boolean;
+}
+
+export interface ExceptionQueueView {
+  header: RunHeader;
+  groups: Array<{
+    group: ActionGroup;
+    label: string;
+    note: string;
+    count: number;
+    valueAtStake: number;
+    exceptions: ExceptionView[];
+  }>;
+  total: number;
+}
+
+// ---------------------------------------------------------------------------
+// Screen 7 — Simulate & Override
+// ---------------------------------------------------------------------------
+
+export interface SimulationView {
   field: string;
   label: string;
-  systemValue: number | null;
-  overrideValue: number | null;
-  before: MrpExplain | null;
-  after: MrpExplain | null;
-  /** Projected balance on orderable supply, before and after. */
+  before: number | null;
+  after: number | null;
+  /** Both plans, side by side, on the figures a planner decides with. */
+  metrics: Array<{
+    label: string;
+    before: string;
+    after: string;
+    delta: string;
+    /** Whether the change made things better, worse or neither. */
+    direction: 'BETTER' | 'WORSE' | 'SAME';
+  }>;
+  /** The balance either side, bucketed, so the chart can draw both. */
   beforeBalance: number[];
   afterBalance: number[];
-  dates: string[];
-  /** Worst balance across the horizon either side — the stockout in one number. */
-  beforeLowestBalance: number;
-  afterLowestBalance: number;
+  bucketLabels: string[];
+  beforeFence: FenceView;
+  afterFence: FenceView;
   elapsedMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// Screen 8 — PO Control Tower
+// ---------------------------------------------------------------------------
+
+export interface ControlTowerView {
+  header: RunHeader;
+  openBook: {
+    rows: Array<{ state: string; lines: number; share: number; qty: number; value: number }>;
+    totalLines: number;
+    totalValue: number;
+    /** The figure that should stop a category manager. */
+    unconfirmedShare: number;
+  };
+  closedBook: {
+    rows: Array<{ outcome: string; lines: number; share: number }>;
+    totalLines: number;
+    fillRate: number;
+    /** Line-level on-time-in-full. Currently unknown at GCPL, which is the point. */
+    otif: number;
+    windowDays: number;
+  };
+  byPlant: Array<{ id: string; name: string; lines: number; value: number; unconfirmedShare: number }>;
+  byVendor: Array<{
+    id: string;
+    name: string;
+    lines: number;
+    value: number;
+    medianLeadTimeDays: number;
+    spreadDays: number;
+  }>;
+  byRaiser: Array<{ raiser: string; lines: number; share: number }>;
+  /** Stated on the screen, because the boundary is the product decision. */
+  boundary: string;
+}
+
+// ---------------------------------------------------------------------------
+// The decision log
+// ---------------------------------------------------------------------------
+
+export interface DecisionView {
+  id: string;
+  kind: string;
+  itemId: string;
+  plantId: string;
+  target: string;
+  before: string | null;
+  after: string | null;
+  reasonCode: string | null;
+  reasonLabel: string | null;
+  note: string;
+  actor: string;
 }

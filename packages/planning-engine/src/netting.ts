@@ -155,6 +155,25 @@ export function netItemPlant(input: NettingInput): NettingResult {
   const totalOffset = input.effectiveLeadTimeDays + itemPlant.grProcessingTimeDays + itemPlant.safetyTimeDays;
   const rule = effectiveLotSizeRule(itemPlant);
 
+  /**
+   * Back-scheduling, in the units the lead time is actually measured in.
+   *
+   * A bought material's lead time is calendar days: a vessel sails through the
+   * weekend, customs queues through it, and a quarantine clock does not stop on
+   * a Sunday. A made material's is working days, because a plant that runs six
+   * days a week takes eight calendar days to do six days of work. Walking
+   * working days for an import overstates a 90-day chain by more than two
+   * weeks, which moves the fence past the point where it means anything.
+   *
+   * Either way the answer is snapped back to a day the site is open, because a
+   * purchase order raised on a Sunday is one raised on Monday.
+   */
+  const isBought = itemPlant.procurementType !== 'MAKE';
+  const releaseDayFor = (receiptEpochDay: number): number =>
+    isBought
+      ? calendar.previousWorkingDayOnOrBefore(receiptEpochDay - totalOffset)
+      : calendar.subtractWorkingDays(receiptEpochDay, totalOffset);
+
   const orders: PlannedOrderDraft[] = [];
   const superseded: SupersededRequirement[] = [];
   let firstStockoutDay = -1;
@@ -202,7 +221,7 @@ export function netItemPlant(input: NettingInput): NettingResult {
           day,
           coveredByDay,
           netRequirement,
-          wouldBeReleaseDay: calendar.subtractWorkingDays(planningEpochDay + day, totalOffset) - planningEpochDay,
+          wouldBeReleaseDay: releaseDayFor(planningEpochDay + day) - planningEpochDay,
         });
         projectedAvailable[day] = balance;
         projectedAvailableFeasible[day] = feasibleBalance;
@@ -234,7 +253,7 @@ export function netItemPlant(input: NettingInput): NettingResult {
         const receiptDay = receiptEpochDay - planningEpochDay;
         if (receiptDay > horizonDays) break;
 
-        const releaseEpochDay = calendar.subtractWorkingDays(receiptEpochDay, totalOffset);
+        const releaseEpochDay = releaseDayFor(receiptEpochDay);
         const isReleaseInPast = releaseEpochDay < planningEpochDay;
 
         orders.push({

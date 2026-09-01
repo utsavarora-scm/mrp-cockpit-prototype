@@ -1,368 +1,354 @@
 'use client';
 
 /**
- * Explain — the trust layer.
+ * Explain.
  *
- * The demo lives or dies on one question the last one could not answer: *where
- * does this number come from?* So the drawer has exactly two levels and a hard
- * rule about them.
+ * Opens from any number, never a separate destination. Three tiers, disclosed
+ * progressively, because a planner who accepts the first sentence should not
+ * have to scroll past the arithmetic to get on with their day, and one who does
+ * not should be able to reach a source field without leaving.
  *
- * **Level one** is the arithmetic, laid out as arithmetic — right-aligned, a
- * rule above each total — because a planner checking a figure wants to watch it
- * add up, not read a paragraph asserting that it does. Every value is from the
- * run that produced the recommendation; nothing is recomputed for display. A
- * trust panel that can disagree with the plan it explains is worse than none.
+ *   1. One sentence, before any table.
+ *   2. The arithmetic, one line per operand, each with its own provenance.
+ *   3. The checks a planner would do next — where the requirement came from,
+ *      what else carries the same chemistry, what else goes into the same
+ *      parent, and what the receipts actually measured.
  *
- * **Level two** is the raw source behind any input that came from evidence
- * rather than from master data. Today that is the lead time, and clicking it
- * lists the individual goods receipts it was averaged over — with the unmatched
- * ones counted and named as excluded, never quietly dropped. Two levels is the
- * budget: any figure on screen reaches a source in at most two clicks, and if
- * something needs a third it belongs on a screen, not in a drawer.
+ * No language model anywhere in this. Tier 1 is a template filled from the
+ * calculation and it is deterministic: the same numbers always produce the same
+ * sentence. A generated narrative that cannot be reproduced is the opposite of
+ * a trust layer.
  */
 
-import { formatDateFull, formatDateShort, formatDays, formatNumber } from '@repo/domain';
+import { formatNumber } from '@repo/domain';
 import { Button } from '@repo/ui/components/button';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-  SheetTrigger,
-} from '@repo/ui/components/sheet';
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@repo/ui/components/sheet';
 import { cn } from '@repo/ui/lib/utils';
-import { ChevronRight, TriangleAlert } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 
-import type { ItemDetail, LeadTimeEvidence, MrpExplain } from '@/lib/api-types';
+import type { ChainStep, ExplainLine, ExplainPayload, MaterialDetail } from '@/lib/api-types';
 
 export function ExplainDrawer({
   detail,
-  explain,
   trigger,
+  open,
+  onOpenChange,
 }: {
-  detail: ItemDetail;
-  explain: MrpExplain;
+  detail: MaterialDetail;
   trigger?: React.ReactNode;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [showReceipts, setShowReceipts] = useState(false);
-  const uom = detail.baseUom;
+  const [internalOpen, setInternalOpen] = useState(false);
+  const isOpen = open ?? internalOpen;
+  const setOpen = onOpenChange ?? setInternalOpen;
+
+  const query = useQuery({
+    queryKey: ['explain', detail.itemId, detail.plantId],
+    enabled: isOpen,
+    queryFn: async (): Promise<ExplainPayload> => {
+      const response = await fetch(
+        `/api/material/${encodeURIComponent(detail.itemId)}/${encodeURIComponent(detail.plantId)}/explain`,
+      );
+      if (!response.ok) throw new Error('That could not be explained.');
+      return response.json();
+    },
+  });
 
   return (
-    <Sheet onOpenChange={(open) => !open && setShowReceipts(false)}>
-      <SheetTrigger asChild>
-        {trigger ?? (
-          <Button variant='outline' size='sm' className='h-8 text-[13px]'>
-            Explain this number
-          </Button>
-        )}
-      </SheetTrigger>
-
-      <SheetContent className='flex w-[480px] flex-col gap-0 overflow-y-auto p-0 sm:max-w-[480px]'>
-        <SheetHeader className='space-y-1 border-b px-6 py-5'>
-          <SheetTitle className='text-[15px] font-semibold'>
-            {showReceipts ? 'Goods receipts behind the lead time' : 'Why this order quantity'}
+    <Sheet open={isOpen} onOpenChange={setOpen}>
+      {trigger ? <SheetTrigger asChild>{trigger}</SheetTrigger> : null}
+      <SheetContent side='right' className='flex w-full flex-col gap-0 overflow-y-auto p-0 sm:max-w-[620px]'>
+        <SheetHeader className='border-b px-6 py-4'>
+          <SheetTitle className='text-[15px]'>
+            {detail.itemId} · {detail.description}
           </SheetTitle>
-          <SheetDescription className='text-[13px]'>
-            {showReceipts ? (
-              <>
-                {detail.itemId} · {detail.plantId} — every receipt the average was taken over.
-              </>
-            ) : (
-              <>
-                Recommending{' '}
-                <span className='text-foreground font-medium tabular-nums'>
-                  {formatNumber(explain.recommendedQty)} {uom}
-                </span>{' '}
-                for receipt on {formatDateFull(explain.receiptDate)}.
-              </>
-            )}
-          </SheetDescription>
+          <p className='text-muted-foreground text-[12px]'>
+            {detail.plantId} · every operand below traces to a source field in at most four steps
+          </p>
         </SheetHeader>
 
-        {showReceipts ? (
-          <Receipts evidence={detail.leadTime} uom={uom} onBack={() => setShowReceipts(false)} />
-        ) : (
-          <Working detail={detail} explain={explain} onDrillLeadTime={() => setShowReceipts(true)} />
-        )}
+        {query.data ? <Body payload={query.data} detail={detail} /> : <Loading />}
       </SheetContent>
     </Sheet>
   );
 }
 
-function Working({
-  detail,
-  explain,
-  onDrillLeadTime,
-}: {
-  detail: ItemDetail;
-  explain: MrpExplain;
-  onDrillLeadTime: () => void;
-}) {
-  const uom = detail.baseUom;
-  const evidence = detail.leadTime;
-  const drift =
-    evidence.observedMeanDays !== null && evidence.maintainedDays !== null
-      ? evidence.observedMeanDays - evidence.maintainedDays
-      : null;
+function Loading() {
+  return <p className='text-muted-foreground px-6 py-8 text-[13px]'>Reading the calculation…</p>;
+}
 
+function Body({ payload, detail }: { payload: ExplainPayload; detail: MaterialDetail }) {
   return (
-    <>
-      {explain.isReleaseInPast ? (
-        <div className='bg-status-critical/8 text-status-critical flex items-start gap-2.5 border-b px-6 py-3 text-[13px] leading-relaxed'>
-          <TriangleAlert className='mt-0.5 size-4 shrink-0' />
-          <span>
-            To land on {formatDateFull(explain.receiptDate)} this had to be placed on{' '}
-            {formatDateFull(explain.releaseDate)} — {formatDays(explain.totalOffsetDays)} ago. The plan is recommending
-            an order it is already too late to place.
-          </span>
+    <div className='divide-border divide-y'>
+      {/* Tier 1 — one sentence, before any table. */}
+      <section className='bg-primary/[0.05] px-6 py-5'>
+        <p className='text-[14px] leading-relaxed'>{payload.sentence}</p>
+      </section>
+
+      {/* Tier 2 — the arithmetic. */}
+      <Section title='The arithmetic' note='Displayed components sum to displayed totals. Rounding is its own line.'>
+        <div className='space-y-0.5 font-mono text-[12px]'>
+          {payload.arithmetic.map((line, index) => (
+            <ArithmeticRow key={`${line.label}-${index}`} line={line} />
+          ))}
         </div>
-      ) : null}
-
-      <Section title='Net requirement' subtitle='What the position is short of the level it has to hold'>
-        <Row label='Order-up-to level' value={explain.orderUpToLevel} uom={uom} />
-        <Row label='Less effective stock' value={-explain.effectiveStock.total} uom={uom} />
-        <Row label='Net requirement' value={explain.netRequirement} uom={uom} total />
       </Section>
 
-      <Section title='Effective stock' subtitle='On hand, plus inbound the plan counts, less what is spoken for'>
-        <Row label='Stock on hand' value={explain.effectiveStock.onHand} uom={uom} />
-        <Row label='Inbound before this date' value={explain.effectiveStock.inbound} uom={uom} />
-        <Row label='Less existing commitments' value={-explain.effectiveStock.commitments} uom={uom} />
-        <Row label='Effective stock' value={explain.effectiveStock.total} uom={uom} total />
-        {explain.effectiveStock.unconfirmedInbound > 0 ? (
-          <p className='text-muted-foreground border-border/60 mt-3 border-t pt-3 text-[12px] leading-relaxed'>
-            Of that inbound,{' '}
-            <span className='text-foreground font-medium tabular-nums'>
-              {formatNumber(explain.effectiveStock.unconfirmedInbound)} {uom}
-            </span>{' '}
-            has no supplier commitment behind it. The plan is netting against it as though the date were certain.
-          </p>
-        ) : null}
-      </Section>
-
-      {explain.ruleQty !== explain.recommendedQty ? (
-        <Section title='Lot sizing' subtitle='What the rule asked for, and what the supplier will actually take'>
-          <Row label='Net requirement' value={explain.netRequirement} uom={uom} />
-          <Row
-            label={`Sized by ${explain.assumptions.lotSizeRule ?? 'the lot-size rule'}`}
-            value={explain.ruleQty}
-            uom={uom}
-          />
-          <Row label='After MOQ and rounding' value={explain.recommendedQty} uom={uom} total />
+      {/* Tier 3 — the checks a planner would do next. */}
+      {payload.chain.length > 0 ? (
+        <Section
+          title='Where the requirement came from'
+          note='Yields are properties of the process; ratios and splits are decisions somebody made. They are argued about with different people, so they are shown apart.'
+        >
+          <ol className='space-y-2'>
+            {payload.chain.map((step, index) => (
+              <ChainRow key={`${step.itemId}-${index}`} step={step} isLast={index === payload.chain.length - 1} />
+            ))}
+          </ol>
         </Section>
       ) : null}
 
-      <Section title='What it rests on' subtitle='The inputs behind the arithmetic above'>
-        <Input label='Average daily demand' value={`${formatNumber(explain.assumptions.averageDailyDemand)} ${uom}`} />
-        <Input label='Safety stock' value={`${formatNumber(explain.assumptions.safetyStock)} ${uom}`} />
-        <Input label='Inventory norm' value={`${formatNumber(explain.assumptions.inventoryNorm)} ${uom}`} />
-
-        {/* The one input that came from evidence rather than master data, so the
-            one that gets a way through to the evidence. */}
-        <SourceRow
-          label='Lead time'
-          value={formatDays(explain.assumptions.leadTimeDays)}
-          source={`${evidence.maintainedSource} · maintained ${formatDateShort(evidence.paramsLastChangedOn)}`}
-          note={
-            drift !== null && Math.abs(drift) >= 1
-              ? `${formatDays(evidence.observedMeanDays as number)} actually observed — ${drift > 0 ? '+' : ''}${Math.round(drift)} days`
-              : null
-          }
-          drilldown={`${evidence.matchedCount} receipts matched${
-            evidence.unmatchedCount > 0 ? ` · ${evidence.unmatchedCount} unmatched, excluded` : ''
-          }`}
-          onDrill={evidence.matchedCount > 0 ? onDrillLeadTime : undefined}
-        />
-
-        {explain.assumptions.moq ? (
-          <Input label='Minimum order quantity' value={`${formatNumber(explain.assumptions.moq)} ${uom}`} />
-        ) : null}
-      </Section>
-
-      <Section title='Dates' subtitle='When it has to be placed, for when it is needed'>
-        <Input label='Receipt needed' value={formatDateFull(explain.receiptDate)} />
-        <Input
-          label='Place by'
-          value={formatDateFull(explain.releaseDate)}
-          tone={explain.isReleaseInPast ? 'critical' : undefined}
-        />
-        <Input label='Total offset' value={formatDays(explain.totalOffsetDays)} />
-      </Section>
-    </>
-  );
-}
-
-/** Level two: the receipts themselves. */
-function Receipts({ evidence, uom, onBack }: { evidence: LeadTimeEvidence; uom: string; onBack: () => void }) {
-  return (
-    <>
-      <div className='border-b px-6 py-3'>
-        <button
-          type='button'
-          onClick={onBack}
-          className='text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-[13px]'
+      {payload.categoryCheck.length > 0 ? (
+        <Section
+          title='Same chemistry, different material code'
+          note='The lever nothing on a planning screen shows today. The item category exists in the material master and nowhere in the plan.'
         >
-          <ChevronRight className='size-3.5 rotate-180' />
-          Back to the working
-        </button>
-      </div>
+          <table className='w-full'>
+            <tbody>
+              {payload.categoryCheck.map((row) => (
+                <tr key={row.itemId} className='grid-row'>
+                  <td className='grid-cell font-mono text-[12px]'>{row.itemId}</td>
+                  <td className='grid-cell'>{row.description}</td>
+                  <td className='grid-cell num'>{row.leadTimeDays} d</td>
+                  <td className='grid-cell text-right text-[12px]'>
+                    <span
+                      className={row.reachesTheBreach ? 'text-status-settled font-medium' : 'text-muted-foreground'}
+                    >
+                      {row.earliestReceiptWeek}
+                    </span>
+                  </td>
+                  <td className='grid-cell text-right text-[11px]'>
+                    {row.reachesTheBreach ? (
+                      <span className='text-status-settled'>reaches it</span>
+                    ) : (
+                      <span className='text-muted-foreground'>too late</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+      ) : null}
 
-      <div className='bg-surface-sunken border-b px-6 py-4'>
-        <div className='flex items-baseline justify-between'>
-          <span className='text-muted-foreground text-[12px] font-medium'>Observed lead time</span>
-          <span className='text-[24px] font-semibold tracking-[-0.02em] tabular-nums'>
-            {formatDays(evidence.observedMeanDays ?? 0)}
-          </span>
+      {payload.horizontalCheck.length > 0 ? (
+        <Section
+          title='The other components of the same parent'
+          note='Expediting one component of a set whose partner cannot move just fills the warehouse.'
+        >
+          <table className='w-full'>
+            <tbody>
+              {payload.horizontalCheck.map((row) => (
+                <tr key={row.itemId} className='grid-row'>
+                  <td className='grid-cell font-mono text-[12px]'>{row.itemId}</td>
+                  <td className='grid-cell max-w-[220px] truncate'>{row.description}</td>
+                  <td className='grid-cell text-right text-[12px]'>
+                    {row.firstBreachDate ? (
+                      <span className={row.blocked ? 'text-status-critical font-medium' : 'text-status-attention'}>
+                        breaches {row.firstBreachDate.slice(5)}
+                      </span>
+                    ) : (
+                      <span className='text-status-settled'>covered</span>
+                    )}
+                  </td>
+                  <td className='grid-cell text-right text-[11px]'>
+                    {row.blocked ? <span className='text-status-critical'>cannot move</span> : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+      ) : null}
+
+      <Section
+        title='Maintained against measured'
+        note='Phase 1 measures. Proposing a new value is the norms calculator, and keeping those apart is what makes this worth acting on.'
+      >
+        <div className='mb-3 grid grid-cols-3 gap-3 text-[13px]'>
+          <Figure
+            label='Maintained'
+            value={payload.realityCheck.maintainedDays === null ? '—' : `${payload.realityCheck.maintainedDays} d`}
+          />
+          <Figure
+            label='Measured'
+            value={payload.realityCheck.measuredDays === null ? '—' : `${payload.realityCheck.measuredDays} d`}
+            tone={
+              payload.realityCheck.measuredDays !== null &&
+              payload.realityCheck.maintainedDays !== null &&
+              payload.realityCheck.measuredDays > payload.realityCheck.maintainedDays
+                ? 'bad'
+                : undefined
+            }
+          />
+          <Figure
+            label='Spread'
+            value={payload.realityCheck.stdDevDays === null ? '—' : `±${payload.realityCheck.stdDevDays} d`}
+          />
         </div>
-        <p className='text-muted-foreground mt-1 text-[12px] leading-relaxed'>
-          Mean of {evidence.matchedCount} matched receipts
-          {evidence.observedStdDevDays !== null
-            ? `, standard deviation ${evidence.observedStdDevDays.toFixed(1)} days`
-            : ''}
-          .
-          {evidence.unmatchedCount > 0 ? (
-            <>
-              {' '}
-              {evidence.unmatchedCount} further receipts could not be reconciled to a delivery line and are excluded —
-              they are kept in the unmatched queue, not discarded.
-            </>
-          ) : null}
+        <p className='text-muted-foreground mb-2 text-[11px]'>
+          {payload.realityCheck.matchedCount} receipts reconciled to a delivery line.{' '}
+          {payload.realityCheck.unmatchedCount > 0
+            ? `${payload.realityCheck.unmatchedCount} excluded — they match no line, so they carry no reliable release date.`
+            : 'Nothing excluded.'}
         </p>
-      </div>
+        <table className='w-full'>
+          <thead>
+            <tr className='bg-surface-sunken'>
+              <th className='grid-head text-left'>Order</th>
+              <th className='grid-head text-left'>Released</th>
+              <th className='grid-head text-left'>Available</th>
+              <th className='grid-head text-right'>Days</th>
+              <th className='grid-head text-right'>vs plan</th>
+              <th className='grid-head text-left'>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {payload.realityCheck.receipts.slice(0, 10).map((receipt) => (
+              <tr key={receipt.poId} className='grid-row'>
+                <td className='grid-cell font-mono text-[11px]'>{receipt.poId}</td>
+                <td className='grid-cell text-[11px]'>{receipt.orderedOn}</td>
+                <td className='grid-cell text-[11px]'>{receipt.qaReleasedOn ?? receipt.receivedOn}</td>
+                <td className='grid-cell num'>{receipt.totalDays}</td>
+                <td className={cn('grid-cell num', receipt.deviationDays > 0 && 'text-status-critical')}>
+                  {receipt.deviationDays > 0 ? '+' : ''}
+                  {receipt.deviationDays}
+                </td>
+                <td className='text-muted-foreground grid-cell text-[11px]'>{receipt.reasonLabel ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Section>
 
-      <table className='w-full'>
-        <thead className='bg-surface-sunken sticky top-0'>
-          <tr>
-            <Th>Order</Th>
-            <Th>Ordered</Th>
-            <Th>Received</Th>
-            <Th align='right'>Days</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {evidence.receipts.map((receipt) => {
-            const late = evidence.maintainedDays !== null && receipt.actualLeadTimeDays > evidence.maintainedDays;
-            return (
-              <tr key={receipt.poId} className='border-border/50 border-b'>
-                <td className='py-2.5 pl-6 font-mono text-[12px]'>{receipt.poId}</td>
-                <td className='text-muted-foreground py-2.5 text-[13px]'>{formatDateShort(receipt.orderedOn)}</td>
-                <td className='py-2.5 text-[13px]'>{formatDateShort(receipt.receivedOn)}</td>
+      <Section title='Provenance' note='System, field, value, and when it was last touched.'>
+        <table className='w-full'>
+          <tbody>
+            {payload.provenance.map((row) => (
+              <tr key={row.field} className='grid-row'>
+                <td className='grid-cell'>{row.field}</td>
+                <td className='grid-cell num'>{row.value}</td>
+                <td className='text-muted-foreground grid-cell text-right text-[11px]'>{row.system}</td>
                 <td
                   className={cn(
-                    'py-2.5 pr-6 text-right text-[13px] font-medium tabular-nums',
-                    late && 'text-status-attention',
+                    'grid-cell text-right text-[11px]',
+                    row.ageDays > 365 ? 'text-status-attention' : 'text-muted-foreground',
                   )}
                 >
-                  {receipt.actualLeadTimeDays}
+                  {row.lastChangedOn}
+                  {row.ageDays > 365 ? ` · ${Math.round(row.ageDays / 365)}y ago` : ''}
                 </td>
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
+            ))}
+          </tbody>
+        </table>
+      </Section>
 
-      <p className='text-muted-foreground px-6 py-4 text-[12px] leading-relaxed'>
-        Quantities average {formatNumber(evidence.receipts[0]?.qty ?? 0)} {uom} a delivery, from{' '}
-        {evidence.receipts[0]?.vendorName ?? evidence.receipts[0]?.vendorId ?? 'the supplier'}. Days are received-on
-        less ordered-on, in calendar days — never a value stored alongside the dates.
-      </p>
-    </>
+      <div className='px-6 py-4'>
+        <p className='text-muted-foreground text-[11px]'>
+          {detail.itemId} at {detail.plantId} · low-level code {detail.lowLevelCode} · every figure above comes from the
+          run stamped {detail.header.mpsVersion}.
+        </p>
+      </div>
+    </div>
   );
 }
 
-function Section({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
+function ArithmeticRow({ line }: { line: ExplainLine }) {
   return (
-    <section className='border-b px-6 py-5'>
-      <h3 className='text-muted-foreground text-[12px] font-semibold tracking-[0.04em] uppercase'>{title}</h3>
-      <p className='text-muted-foreground mt-0.5 mb-3 text-[12px]'>{subtitle}</p>
+    <div
+      className={cn('flex items-baseline gap-2', line.emphasis && 'border-border/70 mt-1 border-t pt-1 font-semibold')}
+    >
+      <span className='text-muted-foreground w-3 shrink-0 text-right'>{line.operator}</span>
+      <span className='flex-1 truncate'>{line.label}</span>
+      <span className='w-28 shrink-0 text-right tabular-nums'>
+        {line.value === null ? '' : `${formatNumber(line.value)} ${line.uom}`}
+      </span>
+      {line.source ? (
+        <span className='text-muted-foreground w-[190px] shrink-0 truncate text-[10px]' title={line.source}>
+          ← {line.source}
+        </span>
+      ) : (
+        <span className='w-[190px] shrink-0' />
+      )}
+    </div>
+  );
+}
+
+function ChainRow({ step, isLast }: { step: ChainStep; isLast: boolean }) {
+  return (
+    <li className='flex items-baseline gap-3'>
+      <span
+        className={cn(
+          'mt-0.5 size-1.5 shrink-0 rounded-full',
+          step.kind === 'PROCESS' ? 'bg-status-attention' : 'bg-primary',
+        )}
+      />
+      <div className='flex-1'>
+        <p className={cn('text-[13px]', isLast && 'font-medium')}>
+          {formatNumber(step.resultQty)} <span className='text-muted-foreground text-[11px]'>{step.uom}</span>{' '}
+          <span className='text-muted-foreground'>· {step.itemId}</span>
+        </p>
+        <p className='text-muted-foreground text-[11px]'>
+          {step.label} — {step.factorLabel}
+          <span
+            className={cn(
+              'ml-2 rounded px-1 py-px text-[10px]',
+              step.kind === 'PROCESS' ? 'bg-status-attention/15 text-status-attention' : 'bg-primary/10 text-primary',
+            )}
+          >
+            {step.kind === 'PROCESS' ? 'process' : 'decision'}
+          </span>
+        </p>
+      </div>
+    </li>
+  );
+}
+
+function Section({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
+  return (
+    <section className='px-6 py-5'>
+      <h3 className='text-[13px] font-semibold'>{title}</h3>
+      {note ? (
+        <p className='text-muted-foreground mt-0.5 mb-3 text-[11px] leading-snug'>{note}</p>
+      ) : (
+        <div className='mb-3' />
+      )}
       {children}
     </section>
   );
 }
 
-/** One line of arithmetic. Totals carry a rule, the way they would on paper. */
-function Row({ label, value, uom, total }: { label: string; value: number; uom: string; total?: boolean }) {
+function Figure({ label, value, tone }: { label: string; value: string; tone?: 'bad' }) {
   return (
-    <div
-      className={cn(
-        'flex items-baseline justify-between gap-4 py-1',
-        total && 'border-foreground/25 mt-1 border-t pt-2 font-semibold',
-      )}
-    >
-      <span className={cn('text-[13px]', !total && 'text-muted-foreground')}>{label}</span>
-      <span className='text-[13px] tabular-nums'>
-        {value < 0 ? '−' : ''}
-        {formatNumber(Math.abs(value))} <span className='text-muted-foreground font-normal'>{uom}</span>
-      </span>
+    <div>
+      <p className='text-muted-foreground text-[11px]'>{label}</p>
+      <p className={cn('text-[18px] font-semibold tabular-nums', tone === 'bad' && 'text-status-critical')}>{value}</p>
     </div>
   );
 }
 
-function Input({ label, value, tone }: { label: string; value: string; tone?: 'critical' }) {
+export function ExplainButton({ detail }: { detail: MaterialDetail }) {
   return (
-    <div className='flex items-baseline justify-between gap-4 py-1'>
-      <span className='text-muted-foreground text-[13px]'>{label}</span>
-      <span className={cn('text-[13px] tabular-nums', tone === 'critical' && 'text-status-critical font-medium')}>
-        {value}
-      </span>
-    </div>
-  );
-}
-
-/**
- * An input that carries its provenance: where the value is maintained, what the
- * evidence says instead, and a way through to the evidence itself.
- */
-function SourceRow({
-  label,
-  value,
-  source,
-  note,
-  drilldown,
-  onDrill,
-}: {
-  label: string;
-  value: string;
-  source: string;
-  note: string | null;
-  drilldown: string;
-  onDrill?: () => void;
-}) {
-  return (
-    <div className='border-border/60 mt-2 border-t pt-3'>
-      <div className='flex items-baseline justify-between gap-4'>
-        <span className='text-muted-foreground text-[13px]'>{label}</span>
-        <span className='text-[13px] font-medium tabular-nums'>{value}</span>
-      </div>
-      <p className='text-muted-foreground mt-1 text-[12px]'>{source}</p>
-      {note ? <p className='text-status-attention mt-1 text-[12px] font-medium'>{note}</p> : null}
-      {onDrill ? (
-        <button
-          type='button'
-          onClick={onDrill}
-          className='text-primary mt-2 inline-flex items-center gap-1 text-[12px] font-medium hover:underline'
-        >
-          {drilldown}
-          <ChevronRight className='size-3.5' />
-        </button>
-      ) : (
-        <p className='text-muted-foreground mt-2 text-[12px]'>{drilldown}</p>
-      )}
-    </div>
-  );
-}
-
-function Th({ children, align = 'left' }: { children: React.ReactNode; align?: 'left' | 'right' }) {
-  return (
-    <th
-      className={cn(
-        'text-muted-foreground py-2 text-[11px] font-medium tracking-[0.04em] uppercase',
-        align === 'right' ? 'pr-6 text-right' : 'pl-6 text-left',
-      )}
-    >
-      {children}
-    </th>
+    <ExplainDrawer
+      detail={detail}
+      trigger={
+        <Button variant='outline' size='sm' className='h-8 text-[13px]'>
+          Explain
+        </Button>
+      }
+    />
   );
 }

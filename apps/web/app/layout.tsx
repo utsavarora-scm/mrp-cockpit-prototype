@@ -6,8 +6,9 @@ import GlobalLoading from './loading';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'MRP Exception Cockpit',
-  description: 'Planning exceptions across SAP, Kinaxis and o9, ranked by what they cost.',
+  title: 'Planning & Supply Schedule',
+  description:
+    'Turns the MRP result into an executable purchase-order and delivery schedule, tracks committed against assumed supply, and records what actually arrived.',
 };
 
 export default function RootLayout({
@@ -17,7 +18,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang='en' suppressHydrationWarning>
-      <body className={`${dmSans.className} ${plexMono.variable} antialiased`}>
+      <body suppressHydrationWarning className={`${dmSans.className} ${plexMono.variable} antialiased`}>
         <Suspense fallback={<GlobalLoading />}>
           <Providers>{children}</Providers>
         </Suspense>

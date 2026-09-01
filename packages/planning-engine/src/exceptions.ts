@@ -200,18 +200,20 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
     raised.push(exception);
   };
 
-  // ---- The honest balance: stock and orders only, nothing proposed ---------
+  // ---- The balance that survives doing everything still possible -----------
   //
-  // Tier 3 is excluded by construction — it is not in this series — which is
-  // what makes "a breach avoided only by a planned receipt is still a breach"
-  // true by arithmetic rather than by a rule somebody has to remember.
+  // Orders whose release date has already passed are excluded from this series
+  // by construction, which is what makes "a breach avoided only by a receipt
+  // nobody can still order is still a breach" true by arithmetic rather than by
+  // a rule somebody has to remember. What is left is the exposure that no
+  // amount of ordering can close.
   let firstBreachDay = -1;
   let firstStockoutDay = -1;
   let worstBreachQty = 0;
   let worstStockoutQty = 0;
 
   for (let day = 0; day <= horizonDays; day += 1) {
-    const balance = plan.projectedBeforePlanned[day] as number;
+    const balance = plan.projectedAvailableFeasible[day] as number;
     if (balance < 0) {
       if (firstStockoutDay === -1) firstStockoutDay = day;
       worstStockoutQty = Math.max(worstStockoutQty, -balance);
@@ -233,7 +235,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
       code: 'PROJECTED_STOCKOUT',
       group: reachable ? 'ORDER_NOW' : 'CANNOT_ORDER',
       severity: 'CRITICAL',
-      headline: `${context.description} runs out on day ${firstStockoutDay} — ${round(worstStockoutQty)} ${context.baseUom} of demand goes unmet on stock and existing orders alone.`,
+      headline: `${context.description} runs out, and stays out: the balance reaches ${round(-worstStockoutQty)} ${context.baseUom} at its worst, even after every order that can still be placed.`,
       biteDay: firstStockoutDay,
       qtyAtStake: worstStockoutQty,
       reachableByOrdering: firstStockoutDay >= fence.earliestReceiptDay,
@@ -243,7 +245,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
         {
           label: 'Worst balance',
           value: -worstStockoutQty,
-          source: 'Projected balance before planned orders, rolled from opening stock',
+          source: 'Projected balance after every order that can still be placed',
         },
         { label: 'Earliest a new order could land', value: fence.earliestReceiptDay, source: 'Lead-time chain' },
       ],
@@ -255,7 +257,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
       code: 'SAFETY_STOCK_BREACH',
       group: reachable ? 'ORDER_NOW' : 'CANNOT_ORDER',
       severity: firstBreachDay <= fence.earliestReceiptDay ? 'HIGH' : 'MEDIUM',
-      headline: `${context.description} falls ${round(worstBreachQty)} ${context.baseUom} below its safety stock on day ${firstBreachDay}, on stock and existing orders alone.`,
+      headline: `${context.description} falls ${round(worstBreachQty)} ${context.baseUom} into its safety stock, even after every order that can still be placed.`,
       biteDay: firstBreachDay,
       qtyAtStake: worstBreachQty,
       reachableByOrdering: reachable,
@@ -329,7 +331,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
             value: reachableSibling.earliestReceiptDay,
             source: `Lead-time chain for ${reachableSibling.itemId}`,
           },
-          { label: 'Exposure first bites', value: biteDay, source: 'Projected balance before planned orders' },
+          { label: 'Exposure first bites', value: biteDay, source: 'Projected balance after placeable orders' },
         ],
         actions: [
           `Order ${reachableSibling.itemId} for the weeks it can cover, and take the rest as residual.`,
@@ -373,7 +375,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
             source: 'Open order schedule lines with no vendor acknowledgement',
           },
           { label: 'Breach without it', value: confirmedBreachDay, source: 'Balance on acknowledged supply only' },
-          { label: 'Breach with it', value: firstBreachDay, source: 'Balance before planned orders' },
+          { label: 'Breach with it', value: firstBreachDay, source: 'Balance after placeable orders' },
         ],
         actions: [
           `Get ${line.vendorName ?? line.vendorId ?? 'the vendor'} to acknowledge ${line.orderId} line ${line.line}.`,
@@ -422,7 +424,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
         qtyAtStake: late.qty,
         reachableByOrdering: true,
         operands: [
-          { label: 'Needed by day', value: biteDay, source: 'Projected balance before planned orders' },
+          { label: 'Needed by day', value: biteDay, source: 'Projected balance after placeable orders' },
           {
             label: 'Currently expected day',
             value: late.expectedDay,
