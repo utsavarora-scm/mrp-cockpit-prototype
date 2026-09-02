@@ -17,7 +17,7 @@
 
 import type { Item, ItemPlant } from '@repo/domain';
 import type { WorkingCalendar } from './calendar';
-import { applyLotSizing, effectiveLotSizeRule } from './lot-sizing';
+import { applyLotSizing, effectiveLotSizeRule, type LotSizingConflict, type LotSizingStep } from './lot-sizing';
 
 /** Quantities below this are rounding noise, not a shortage. */
 const EPSILON = 1e-6;
@@ -47,6 +47,38 @@ export interface PlannedOrderDraft {
   ruleQty: number;
   /** Net requirement that triggered the order. */
   netRequirement: number;
+  /**
+   * The shortage this order serves.
+   *
+   * Shared by every slice a max-lot split produced, so anything summing
+   * exposure across orders can count one shortage once. Summing
+   * `netRequirement` over slices reports a 12,000 MT requirement three times.
+   */
+  requirementId: string;
+}
+
+/**
+ * One shortage, and everything lot sizing did to it.
+ *
+ * Held per requirement rather than per order because a max-lot split produces
+ * several orders from one shortage: copying the trace onto each would show three
+ * 4,000 MT slices each claiming a 12,000 MT derivation.
+ */
+export interface RequirementDraft {
+  requirementId: string;
+  itemId: string;
+  plantId: string;
+  /** Day offset of the bucket that breached. */
+  day: number;
+  netRequirement: number;
+  ruleQty: number;
+  /** The reconciled total, before splitting. Slices sum to this. */
+  finalOrderQuantity: number;
+  slices: number[];
+  threshold: number;
+  /** The balance the order is topping up from. */
+  balanceBefore: number;
+  trace: LotSizingStep[];
 }
 
 export interface NettingInput {
@@ -105,6 +137,10 @@ export interface NettingResult {
   netRequirements: Float64Array;
   /** First bucket the position runs below its norm, or −1. Where line 1 is needed. */
   firstUncoveredDay: number;
+  /** One entry per shortage, carrying the sizing trace the orders share. */
+  requirements: RequirementDraft[];
+  /** Parameter sets that could not be satisfied. A data-quality finding. */
+  conflicts: LotSizingConflict[];
 }
 
 /** Items with no planning type, or explicitly excluded, are not netted. */
@@ -162,6 +198,8 @@ export function netItemPlant(input: NettingInput): NettingResult {
       : calendar.subtractWorkingDays(receiptEpochDay, totalOffset);
 
   const orders: PlannedOrderDraft[] = [];
+  const requirements: RequirementDraft[] = [];
+  const conflicts: LotSizingConflict[] = [];
   let firstStockoutDay = -1;
   let firstBreachDay = -1;
   const netRequirements = new Float64Array(horizonDays + 1);
@@ -219,10 +257,28 @@ export function netItemPlant(input: NettingInput): NettingResult {
         horizonDays,
         grossRequirements,
         scheduledReceipts,
+        plannedReceipts,
+        thresholdAt,
         projectedAvailable: balance,
         moq: input.moq,
         incrementQty: input.incrementQty,
       });
+
+      const requirementId = `${itemPlant.itemId}@${itemPlant.plantId}#${day}`;
+      requirements.push({
+        requirementId,
+        itemId: itemPlant.itemId,
+        plantId: itemPlant.plantId,
+        day,
+        netRequirement,
+        ruleQty: sizing.ruleQty,
+        finalOrderQuantity: sizing.finalOrderQuantity,
+        slices: sizing.orderQtys.slice(),
+        threshold,
+        balanceBefore: balance,
+        trace: sizing.trace,
+      });
+      for (const conflict of sizing.conflicts) conflicts.push(conflict);
 
       const bucketEpochDay = planningEpochDay + day;
       for (let slice = 0; slice < sizing.orderQtys.length; slice += 1) {
@@ -253,6 +309,7 @@ export function netItemPlant(input: NettingInput): NettingResult {
           sourcePlantId: input.sourcePlantId,
           ruleQty: sizing.ruleQty,
           netRequirement,
+          requirementId,
         });
 
         plannedReceipts[receiptDay] = (plannedReceipts[receiptDay] as number) + qty;
@@ -276,6 +333,8 @@ export function netItemPlant(input: NettingInput): NettingResult {
     threshold: thresholdAt(0),
     netRequirements,
     firstUncoveredDay: firstBreachDay,
+    requirements,
+    conflicts,
   };
 }
 

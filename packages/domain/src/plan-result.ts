@@ -88,6 +88,79 @@ export interface ItemPlantPlan {
   daysOfCover: Float64Array;
 }
 
+/** One lot-sizing adjustment, as it actually happened. */
+export type LotSizingStepKind =
+  | 'RULE'
+  | 'SCRAP'
+  | 'VENDOR_MOQ'
+  | 'MIN_LOT'
+  | 'VENDOR_INCREMENT'
+  | 'ROUNDING'
+  | 'MAX_LOT_SPLIT';
+
+/**
+ * A step in the sizing of one requirement.
+ *
+ * `binding` alone is not enough to describe what a step did: a max-lot split
+ * binds while leaving the total untouched, which is a change of shape and not of
+ * quantity. Anything narrating the order — a banner, an explain row — needs to
+ * tell those apart, so both are recorded.
+ */
+export interface LotSizingStep {
+  kind: LotSizingStepKind;
+  beforeQty: number;
+  /** The total after this step. Not the slice size — see `sliceQtys`. */
+  afterQty: number;
+  deltaQty: number;
+  /** `MAX_LOT_SPLIT` only. A scalar cannot express a split. */
+  sliceQtys: number[] | null;
+  /** The master-data value that applied, for the label. */
+  parameter: number | null;
+  source: string;
+  /** The step ran at all — the parameter is maintained. */
+  applied: boolean;
+  changedQuantity: boolean;
+  /** The number of orders changed, even where the total did not. */
+  changedShape: boolean;
+  /** The parameter constrained the outcome. */
+  binding: boolean;
+}
+
+/**
+ * A parameter set that cannot be satisfied — reported rather than resolved by
+ * quietly preferring whichever constraint happened to run last.
+ */
+export interface LotSizingConflict {
+  kind: 'INCOMPATIBLE_INCREMENTS' | 'NO_FEASIBLE_PARTITION';
+  detail: string;
+}
+
+/**
+ * One shortage, and everything lot sizing did to it.
+ *
+ * Held per requirement rather than per order: a max-lot split turns one shortage
+ * into several orders, and copying the trace onto each would show three 4,000 MT
+ * slices all claiming a 12,000 MT derivation. Orders carry `requirementId` and
+ * point here.
+ */
+export interface RequirementExplanation {
+  requirementId: string;
+  itemId: string;
+  plantId: string;
+  /** Day offset of the bucket that breached. */
+  day: number;
+  netRequirement: number;
+  /** What the lot-sizing rule alone asked for, before scrap and the ceilings. */
+  ruleQty: number;
+  /** The reconciled total, before splitting. `slices` sum to this. */
+  finalOrderQuantity: number;
+  slices: number[];
+  threshold: number;
+  /** The balance the order is topping up from. */
+  balanceBefore: number;
+  sizingTrace: LotSizingStep[];
+}
+
 /**
  * The working behind one recommended order.
  *
@@ -120,6 +193,14 @@ export interface PlannedOrderExplanation {
   effectiveLeadTimeDays: number;
   /** Lead time plus goods-receipt processing plus safety time. */
   totalOffsetDays: number;
+  /**
+   * The shortage this order serves, shared by every slice of a split.
+   *
+   * Anything summing exposure across orders must deduplicate on this: summing
+   * `netRequirement` over three slices of one 12,000 MT shortage reports it
+   * three times, which is how a 0.64 MT miss came to be priced at ₹7.51 Cr.
+   */
+  requirementId: string;
 }
 
 export interface MrpResult {
@@ -132,6 +213,10 @@ export interface MrpResult {
   plannedOrders: SupplyElement[];
   /** Keyed by `planKey` — the working behind each item-plant's recommendations. */
   orderExplanations: Map<string, PlannedOrderExplanation[]>;
+  /** Keyed by `planKey` — one entry per shortage, carrying the sizing trace. */
+  requirementExplanations: Map<string, RequirementExplanation[]>;
+  /** Keyed by `planKey` — parameter sets that could not be satisfied. */
+  lotSizingConflicts: Map<string, LotSizingConflict[]>;
   /** Dependent demand the engine generated while exploding BOMs. */
   derivedDemand: DemandElement[];
   /** Item-plants whose BOM participates in a cycle — planned around, not thrown on. */

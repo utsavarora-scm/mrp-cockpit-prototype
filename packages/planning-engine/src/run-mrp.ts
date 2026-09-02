@@ -14,10 +14,12 @@ import {
   type ItemPlant,
   type ItemPlantPlan,
   type ItemVendor,
+  type LotSizingConflict,
   type MrpOptions,
   type MrpResult,
   type PlannedOrderExplanation,
   type PlanningSnapshot,
+  type RequirementExplanation,
   type StockPosition,
   type SupplyElement,
   type SupplyTier,
@@ -227,6 +229,8 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
   const ordersByKey = new Map<string, PlannedOrderDraft[]>();
   const plannedOrders: SupplyElement[] = [];
   const orderExplanations = new Map<string, PlannedOrderExplanation[]>();
+  const requirementExplanations = new Map<string, RequirementExplanation[]>();
+  const lotSizingConflicts = new Map<string, LotSizingConflict[]>();
 
   for (const key of order) {
     const plan = plans.get(key);
@@ -305,9 +309,32 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
           isReleaseInPast: draft.isReleaseInPast,
           effectiveLeadTimeDays: draft.effectiveLeadTimeDays,
           totalOffsetDays: draft.totalOffsetDays,
+          requirementId: draft.requirementId,
         }))
       );
     }
+
+    // The sizing trace, kept once per shortage rather than copied onto every
+    // slice a max-lot split produced.
+    if (result.requirements.length > 0) {
+      requirementExplanations.set(
+        key,
+        result.requirements.map((draft) => ({
+          requirementId: draft.requirementId,
+          itemId: draft.itemId,
+          plantId: draft.plantId,
+          day: draft.day,
+          netRequirement: draft.netRequirement,
+          ruleQty: draft.ruleQty,
+          finalOrderQuantity: draft.finalOrderQuantity,
+          slices: draft.slices,
+          threshold: draft.threshold,
+          balanceBefore: draft.balanceBefore,
+          sizingTrace: draft.trace,
+        }))
+      );
+    }
+    if (result.conflicts.length > 0) lotSizingConflicts.set(key, result.conflicts);
 
     for (let index = 0; index < result.orders.length; index += 1) {
       const draft = result.orders[index] as PlannedOrderDraft;
@@ -410,6 +437,8 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     plans,
     plannedOrders,
     orderExplanations,
+    requirementExplanations,
+    lotSizingConflicts,
     derivedDemand,
     circularItemPlants: circular,
   };

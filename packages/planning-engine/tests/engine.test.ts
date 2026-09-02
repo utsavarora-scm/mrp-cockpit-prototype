@@ -49,6 +49,8 @@ describe('lot sizing', () => {
       horizonDays: 30,
       grossRequirements: new Float64Array(31),
       scheduledReceipts: new Float64Array(31),
+      plannedReceipts: new Float64Array(31),
+      thresholdAt: () => 0,
       projectedAvailable: 0,
       moq: 0,
       incrementQty: 0,
@@ -71,6 +73,38 @@ describe('lot sizing', () => {
     const result = size('POQ', base({ periodsOfSupplyDays: 7 }), 50, { grossRequirements: gross });
     expect(result.orderQtys).toEqual([650]);
     expect(result.coversThroughDay).toBe(6);
+  });
+
+  it('POQ counts supply already scheduled inside the period', () => {
+    // Demand of 100 a day for a week, and a 700 MT delivery already landing on
+    // day 1. The period covers itself; only the day-0 shortfall is left.
+    //
+    // Flooring each day at zero independently is what broke this: a day whose
+    // receipt exceeds its demand contributed nothing instead of carrying its
+    // surplus forward, so 992 MT of scheduled inbound stopped counting on
+    // RM-30137 and the run asked for 800 MT it did not need.
+    const gross = new Float64Array(31);
+    for (let day = 0; day <= 30; day += 1) gross[day] = 100;
+    const scheduled = new Float64Array(31);
+    scheduled[1] = 700;
+
+    const result = size('POQ', base({ periodsOfSupplyDays: 7 }), 50, {
+      grossRequirements: gross,
+      scheduledReceipts: scheduled,
+    });
+    expect(result.orderQtys).toEqual([50]);
+  });
+
+  it('POQ measures the deficit against the threshold on each future day', () => {
+    const gross = new Float64Array(31);
+    for (let day = 0; day <= 30; day += 1) gross[day] = 100;
+    // A norm of 200 has to be held through the period, not just a zero balance.
+    const result = size('POQ', base({ periodsOfSupplyDays: 7 }), 50, {
+      grossRequirements: gross,
+      thresholdAt: () => 200,
+    });
+    // Runs from 200, loses 600 over days 1–6, so it ends 600 below the norm.
+    expect(result.orderQtys).toEqual([650]);
   });
 
   it('MINMAX orders up to the maximum when the balance falls below the minimum', () => {
@@ -98,10 +132,107 @@ describe('lot sizing', () => {
     expect(result.orderQtys).toEqual([400, 400, 200]);
   });
 
-  it('inflates for assembly scrap last, so rounding is not undone', () => {
+  it('inflates for assembly scrap before rounding, so the result is on the increment', () => {
     const result = size('LFL', base({ roundingValue: 100, scrapPct: 0.2 }), 950);
-    // 950 → rounds to 1,000 → inflated for 20% scrap → 1,250.
-    expect(result.orderQtys).toEqual([1_250]);
+    // 950 → inflated for 20% scrap → 1,187.5 → rounds up to 1,200.
+    //
+    // Inflating last produced 1,250, which is not a multiple of the 100 it had
+    // just rounded to: the adjustment that ran last silently undid the one
+    // before it. Scrap goes first so the ceilings apply to what is released.
+    expect(result.orderQtys).toEqual([1_200]);
+    expect(1_200 % 100).toBe(0);
+    expect(1_200 * (1 - 0.2)).toBeGreaterThanOrEqual(950);
+  });
+
+  it('keeps every slice inside the maximum lot when scrap also applies', () => {
+    // Splitting first and inflating after pushed each slice to 4,444 against a
+    // 4,000 maximum — the split's whole purpose, undone by the next line.
+    const result = size('LFL', base({ maxLotSize: 4_000, scrapPct: 0.1 }), 8_000);
+    for (const slice of result.orderQtys) expect(slice).toBeLessThanOrEqual(4_000);
+    expect(result.orderQtys.reduce((sum, slice) => sum + slice, 0)).toBeCloseTo(result.finalOrderQuantity, 6);
+  });
+
+  it('reconciles a vendor increment and a rounding value that differ', () => {
+    // 30 and 25 share 150. Applying one then the other lands on 800, which is
+    // not a multiple of 30.
+    const result = size('LFL', base({ roundingValue: 25 }), 786, { incrementQty: 30 });
+    expect(result.finalOrderQuantity % 25).toBe(0);
+    expect(result.finalOrderQuantity % 30).toBe(0);
+    expect(result.finalOrderQuantity).toBe(900);
+    expect(result.conflicts).toEqual([]);
+  });
+
+  it('reports a partition that cannot satisfy its own minimum', () => {
+    // 400 against a 300 maximum needs two orders, but each must clear a 250
+    // minimum and 2 × 250 > 400. There is no valid answer to give.
+    const result = size('LFL', base({ maxLotSize: 300, minLotSize: 250 }), 400);
+    expect(result.conflicts.map((row) => row.kind)).toContain('NO_FEASIBLE_PARTITION');
+  });
+});
+
+describe('lot-sizing trace', () => {
+  const base = (overrides: Partial<ItemPlant> = {}) => itemPlant({ itemId: 'X', plantId: 'P1', ...overrides });
+
+  const size = (
+    rule: Parameters<typeof applyLotSizing>[0]['rule'],
+    master: ItemPlant,
+    netRequirement: number,
+    extra: Partial<Parameters<typeof applyLotSizing>[0]> = {}
+  ) =>
+    applyLotSizing({
+      rule,
+      netRequirement,
+      itemPlant: master,
+      standardCost: 10,
+      day: 0,
+      horizonDays: 30,
+      grossRequirements: new Float64Array(31),
+      scheduledReceipts: new Float64Array(31),
+      plannedReceipts: new Float64Array(31),
+      thresholdAt: () => 0,
+      projectedAvailable: 0,
+      moq: 0,
+      incrementQty: 0,
+      ...extra,
+    });
+
+  it('foots: the last step lands on the reconciled total, and slices sum to it', () => {
+    for (const rule of ['LFL', 'FOQ', 'POQ', 'MINMAX', 'EOQ'] as const) {
+      const result = size(
+        rule,
+        base({ fixedLotSize: 500, periodsOfSupplyDays: 7, minLotSize: 386, roundingValue: 25, maxLotSize: 4_000 }),
+        120
+      );
+      const quantitySteps = result.trace.filter((step) => step.kind !== 'MAX_LOT_SPLIT');
+      const last = quantitySteps[quantitySteps.length - 1];
+      expect(last?.afterQty).toBeCloseTo(result.finalOrderQuantity, 6);
+      expect(result.orderQtys.reduce((sum, slice) => sum + slice, 0)).toBeCloseTo(result.finalOrderQuantity, 6);
+    }
+  });
+
+  it('records a non-binding step with a zero delta rather than omitting it', () => {
+    // The MOQ is maintained and does not bind. It still has to appear, or the
+    // planner cannot tell a parameter that did nothing from one that is unset.
+    const result = size('LFL', base({ minLotSize: 100 }), 5_000);
+    const step = result.trace.find((row) => row.kind === 'MIN_LOT');
+    expect(step?.applied).toBe(true);
+    expect(step?.binding).toBe(false);
+    expect(step?.changedQuantity).toBe(false);
+    expect(step?.deltaQty).toBe(0);
+  });
+
+  it('separates a change of shape from a change of quantity', () => {
+    const result = size('LFL', base({ maxLotSize: 400 }), 1_000);
+    const split = result.trace.find((row) => row.kind === 'MAX_LOT_SPLIT');
+    expect(split?.changedShape).toBe(true);
+    expect(split?.changedQuantity).toBe(false);
+    expect(split?.deltaQty).toBe(0);
+    expect(split?.sliceQtys).toEqual([400, 400, 200]);
+  });
+
+  it('omits a step for a parameter that is not maintained', () => {
+    const result = size('LFL', base(), 1_000);
+    expect(result.trace.map((row) => row.kind)).toEqual(['RULE']);
   });
 });
 

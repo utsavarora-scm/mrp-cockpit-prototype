@@ -105,6 +105,7 @@ function order(overrides: Partial<PlannedOrderExplanation> = {}): PlannedOrderEx
     isReleaseInPast: true,
     effectiveLeadTimeDays: 30,
     totalOffsetDays: 30,
+    requirementId: 'RM-1@P1#20',
     ...overrides,
   };
 }
@@ -128,12 +129,49 @@ describe('2 — safety-stock breach', () => {
 });
 
 describe('3 — unreachable requirement', () => {
+  const balance = series(1_000);
+  balance[40] = 300;
+
   it('fires where the order the plan asks for needed releasing before today', () => {
-    const balance = series(1_000);
-    balance[40] = 300;
     expect(codes(context({ plan: plan({ projectedAvailableFeasible: balance }), orders: [order()] }))).toContain(
       'UNREACHABLE_REQUIREMENT'
     );
+  });
+
+  it('prices the shortfall, not the lot-sized quantity', () => {
+    const raised = raiseExceptions(
+      context({ plan: plan({ projectedAvailableFeasible: balance }), orders: [order()] }),
+      HORIZON
+    );
+    const row = raised.find((entry) => entry.code === 'UNREACHABLE_REQUIREMENT');
+    // The order is 1,000; the shortage behind it is 120. Ordering 1,000 to close
+    // a 120 gap does not make the business 1,000 short.
+    expect(row?.qtyAtStake).toBe(120);
+    expect(row?.operands.find((operand) => operand.label === 'Executable order quantity')?.value).toBe(1_000);
+  });
+
+  it('counts one shortage once, however many slices it was cut into', () => {
+    // A max-lot split emits one order per slice, each carrying the same
+    // requirement. Summing across orders reported it three times over.
+    const slices = [order({ qty: 4_000 }), order({ qty: 4_000 }), order({ qty: 4_000 })];
+    const raised = raiseExceptions(
+      context({ plan: plan({ projectedAvailableFeasible: balance }), orders: slices }),
+      HORIZON
+    );
+    const row = raised.find((entry) => entry.code === 'UNREACHABLE_REQUIREMENT');
+    expect(row?.qtyAtStake).toBe(120);
+    expect(row?.operands.find((operand) => operand.label === 'Executable order quantity')?.value).toBe(12_000);
+  });
+
+  it('counts two distinct shortages separately', () => {
+    const raised = raiseExceptions(
+      context({
+        plan: plan({ projectedAvailableFeasible: balance }),
+        orders: [order(), order({ requirementId: 'RM-1@P1#40', netRequirement: 80, requirementDay: 40 })],
+      }),
+      HORIZON
+    );
+    expect(raised.find((entry) => entry.code === 'UNREACHABLE_REQUIREMENT')?.qtyAtStake).toBe(200);
   });
 });
 

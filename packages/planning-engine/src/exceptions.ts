@@ -303,17 +303,37 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
   if (unplaceable.length > 0) {
     const first = unplaceable[0] as PlannedOrderExplanation;
     const totalQty = unplaceable.reduce((sum, order) => sum + order.qty, 0);
+
+    // The exposure is the shortfall, not the lot.
+    //
+    // `order.qty` is what a buyer would raise; most of it is usually lot sizing,
+    // and lot sizing is not something the business is short of. Pricing the lot
+    // put ₹7.51 Cr against a 0.64 MT miss on RM-30137 and ₹85.50 Cr against the
+    // hero, then ranked both above genuinely larger exposures because
+    // `valueAtStake` feeds the score twice over.
+    //
+    // Counted once per shortage: a max-lot split emits one order per slice, each
+    // carrying the same `netRequirement`, so summing across orders reports one
+    // requirement as many times as it was cut up.
+    const shortfallByRequirement = new Map<string, number>();
+    for (const order of unplaceable) {
+      shortfallByRequirement.set(order.requirementId, Math.min(order.netRequirement, order.qty));
+    }
+    const shortfall = [...shortfallByRequirement.values()].reduce((sum, qty) => sum + qty, 0);
+    const requirementCount = shortfallByRequirement.size;
+
     const weeksLate = Math.round((0 - dayOffsetOfRelease(first)) / 7);
     emit({
       code: 'UNREACHABLE_REQUIREMENT',
       group: 'CANNOT_ORDER',
       severity: 'CRITICAL',
-      headline: `${unplaceable.length} proposed ${unplaceable.length === 1 ? 'order' : 'orders'} for ${context.description} needed releasing before today — the first ${weeksLate} ${weeksLate === 1 ? 'week' : 'weeks'} ago. No purchase order placed now can reach ${unplaceable.length === 1 ? 'it' : 'them'}.`,
+      headline: `${requirementCount} ${requirementCount === 1 ? 'requirement' : 'requirements'} for ${context.description} needed ordering before today — the first ${weeksLate} ${weeksLate === 1 ? 'week' : 'weeks'} ago. ${round(shortfall)} ${context.baseUom} of genuine shortfall, against ${round(totalQty)} ${context.baseUom} that would be raised. No purchase order placed now can reach ${requirementCount === 1 ? 'it' : 'them'}.`,
       biteDay: first.requirementDay,
-      qtyAtStake: totalQty,
+      qtyAtStake: shortfall,
       reachableByOrdering: false,
       operands: [
-        { label: 'Quantity proposed', value: totalQty, source: 'Planned orders from this run' },
+        { label: 'Shortfall at stake', value: shortfall, source: 'Net requirement, counted once per shortage' },
+        { label: 'Executable order quantity', value: totalQty, source: 'Planned orders from this run' },
         { label: 'Lead time', value: first.effectiveLeadTimeDays, source: 'Material master' },
         {
           label: 'Total offset including receipt and release',

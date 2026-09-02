@@ -19,7 +19,9 @@
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { HERO_PM, HERO_RM } from '@repo/data-packs';
+import { planKey } from '@repo/domain';
 
+import { runContext } from './context';
 import { explain, materialDetail } from './material';
 import { scheduleBuilder } from './schedule';
 import { resetDemo } from './planning-session';
@@ -36,6 +38,22 @@ import type { GridRow, MaterialDetail } from '../api-types';
 const MT = 5;
 
 let oil: MaterialDetail;
+
+/**
+ * Every material the run actually recommends something for, with its rule.
+ *
+ * Read off the run rather than hand-listed, so a pack that stops generating a
+ * rule fails the test that depends on it instead of silently skipping it.
+ */
+function materialsWithOrders(): Array<{ itemId: string; plantId: string; rule: string | null }> {
+  const context = runContext('baseline');
+  const rows: Array<{ itemId: string; plantId: string; rule: string | null }> = [];
+  for (const facts of context.materials.values()) {
+    if ((context.plan.orderExplanations.get(planKey(facts.itemId, facts.plantId)) ?? []).length === 0) continue;
+    rows.push({ itemId: facts.itemId, plantId: facts.plantId, rule: facts.itemPlant.lotSizeRule });
+  }
+  return rows;
+}
 
 beforeAll(() => {
   resetDemo();
@@ -322,13 +340,9 @@ describe('explain — every number, and every block that foots', () => {
     expect(labels('safetyStock').join(' ')).toMatch(/Safety stock/);
   });
 
-  it('foots: every block‘s operands sum to the total it states', () => {
-    // §15's correctness criterion, as a test. The arithmetic used to print a
-    // literal `+0` for scheduled receipts under a heading promising exactly
-    // this, which is the kind of thing that loses a room.
-    const payload = explain('baseline', HERO_RM.itemId, HERO_RM.plantId);
-    expect(payload).not.toBeNull();
-
+  /** Walk one payload's columns, asserting each `=` against what precedes it. */
+  function assertFoots(payload: ReturnType<typeof explain>, where: string): void {
+    expect(payload, where).not.toBeNull();
     let running: number | null = null;
     for (const line of (payload as NonNullable<typeof payload>).arithmetic) {
       if (line.value === null) continue;
@@ -339,12 +353,41 @@ describe('explain — every number, and every block that foots', () => {
       if (line.operator === '+') running = (running ?? 0) + line.value;
       if (line.operator === '−') running = (running ?? 0) - line.value;
       if (line.operator === '=') {
-        expect(Math.abs((running ?? 0) - line.value), `${line.label}: ${running} vs ${line.value}`).toBeLessThanOrEqual(
-          1,
-        );
+        expect(
+          Math.abs((running ?? 0) - line.value),
+          `${where} — ${line.label}: ${running} vs ${line.value}`,
+        ).toBeLessThanOrEqual(0.01);
         running = line.value;
       }
     }
+  }
+
+  it('foots: every block‘s operands sum to the total it states', () => {
+    // §15's correctness criterion, as a test. The arithmetic used to print a
+    // literal `+0` for scheduled receipts under a heading promising exactly
+    // this, which is the kind of thing that loses a room.
+    assertFoots(explain('baseline', HERO_RM.itemId, HERO_RM.plantId), HERO_RM.itemId);
+  });
+
+  it('foots for every lot-sizing rule, not only the hero‘s', () => {
+    // The hero is FOQ with no fixed lot, which is the one rule where the old
+    // re-derivation happened to agree with the engine. Every POQ, MINMAX and
+    // EOQ material in the pack went untested, and RM-30137 printed a column of
+    // 1 + 385 + 14 under a total of 800 for months because of it.
+    //
+    // Tolerance is 0.01, not 1: a third of a unit lost to rounding is exactly
+    // the failure this is here to catch.
+    const seen = new Set<string>();
+    let checked = 0;
+    for (const material of materialsWithOrders()) {
+      const rule = material.rule ?? 'LFL';
+      if (seen.has(rule)) continue;
+      seen.add(rule);
+      assertFoots(explain('baseline', material.itemId, material.plantId), `${material.itemId} (${rule})`);
+      checked += 1;
+    }
+    expect(checked, 'no materials with recommendations to foot').toBeGreaterThan(1);
+    expect(seen.has('POQ'), 'the pack no longer contains a POQ material to foot').toBe(true);
   });
 
   it('names who last touched every parameter, not only when', () => {

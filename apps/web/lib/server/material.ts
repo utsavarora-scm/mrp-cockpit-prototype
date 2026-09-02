@@ -36,7 +36,9 @@ import {
   weekLabel,
   type BomLine,
   type DeliveryLine,
+  type LotSizingStep,
   type PlannedOrderExplanation,
+  type RequirementExplanation,
   type SupplyElement,
 } from '@repo/domain';
 
@@ -714,10 +716,23 @@ function buildSentence(
   }
 
   const week = weekLabel(order.receiptDate);
-  const lotSizing = Math.max(0, order.qty - order.netRequirement);
+
+  // What actually bound, from the sizing trace — not a guess.
+  //
+  // This clause used to name the minimum order quantity whenever any lot sizing
+  // had happened and a `minLotSize` merely existed. On a POQ material that read
+  // "the order is 800 MT because the minimum order quantity is 386 MT", which is
+  // wrong twice: 386 cannot produce 800, and the MOQ had not bound at all.
+  const shortage = requirementFor(context, facts, order);
+  const drivers = (shortage?.sizingTrace ?? []).filter(
+    (step) => step.kind !== 'RULE' && (step.changedQuantity || step.changedShape),
+  );
+  const ruleStep = (shortage?.sizingTrace ?? []).find((step) => step.kind === 'RULE');
+  if (ruleStep?.changedQuantity) drivers.unshift(ruleStep);
+
   const lotClause =
-    lotSizing > 0 && facts.itemPlant.minLotSize
-      ? ` The order is ${format(order.qty)} ${uom} — not ${format(order.netRequirement)} ${uom} — because the minimum order quantity is ${format(facts.itemPlant.minLotSize)} ${uom}.`
+    shortage && drivers.length > 0
+      ? ` The order is ${format(order.qty)} ${uom} — not ${format(order.netRequirement)} ${uom} — because of ${joinPhrases(drivers.map(describeStep))}.`
       : '';
   const reachClause = order.isReleaseInPast
     ? ` This order needed releasing in ${weekLabel(order.releaseDate)} (${fromEpochDay(toEpochDay(order.releaseDate))}) and cannot now be placed in time.`
@@ -732,6 +747,62 @@ function buildSentence(
     lotClause +
     reachClause
   );
+}
+
+/** The shortage an order serves, carrying the sizing trace the run recorded. */
+function requirementFor(
+  context: RunContext,
+  facts: MaterialFacts,
+  order: PlannedOrderExplanation,
+): RequirementExplanation | null {
+  const requirements = context.plan.requirementExplanations.get(planKey(facts.itemId, facts.plantId)) ?? [];
+  return requirements.find((row) => row.requirementId === order.requirementId) ?? null;
+}
+
+/** How a step reads in a sentence, from what it did rather than from its name. */
+function describeStep(step: LotSizingStep): string {
+  switch (step.kind) {
+    case 'RULE':
+      return step.source.toLowerCase();
+    case 'SCRAP':
+      return `${Math.round((step.parameter ?? 0) * 100)}% scrap`;
+    case 'VENDOR_MOQ':
+      return `a vendor minimum of ${format(step.parameter ?? 0)}`;
+    case 'MIN_LOT':
+      return `a minimum order quantity of ${format(step.parameter ?? 0)}`;
+    case 'VENDOR_INCREMENT':
+      return `a vendor increment of ${format(step.parameter ?? 0)}`;
+    case 'ROUNDING':
+      return `a rounding value of ${format(step.parameter ?? 0)}`;
+    case 'MAX_LOT_SPLIT':
+      return `a maximum lot of ${format(step.parameter ?? 0)}, which splits it into ${step.sliceQtys?.length ?? 1} orders`;
+  }
+}
+
+/** "a, b and c" — so a compound cause reads as one. */
+function joinPhrases(phrases: string[]): string {
+  if (phrases.length <= 1) return phrases[0] ?? '';
+  return `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}`;
+}
+
+/** The label a trace row carries in the explain column. */
+function labelStep(step: LotSizingStep, uom: string): string {
+  switch (step.kind) {
+    case 'RULE':
+      return step.source;
+    case 'SCRAP':
+      return `Scrap allowance ${Math.round((step.parameter ?? 0) * 100)}%`;
+    case 'VENDOR_MOQ':
+      return `Vendor minimum order quantity ${format(step.parameter ?? 0)} ${uom}`;
+    case 'MIN_LOT':
+      return `Minimum order quantity ${format(step.parameter ?? 0)} ${uom}`;
+    case 'VENDOR_INCREMENT':
+      return `Vendor increment ${format(step.parameter ?? 0)} ${uom}`;
+    case 'ROUNDING':
+      return `Rounding value ${format(step.parameter ?? 0)} ${uom}`;
+    case 'MAX_LOT_SPLIT':
+      return `Maximum lot ${format(step.parameter ?? 0)} ${uom}`;
+  }
 }
 
 /**
@@ -918,11 +989,11 @@ function buildArithmetic(
     value: number | null,
     operator: ExplainLine['operator'],
     source: string | null,
-    options: { emphasis?: boolean; expandable?: boolean } = {},
+    options: { emphasis?: boolean; expandable?: boolean; precise?: boolean } = {},
   ): void => {
     lines.push({
       label,
-      value: value === null ? null : round(value),
+      value: value === null ? null : options.precise ? round2(value) : round(value),
       uom,
       operator,
       source,
@@ -945,10 +1016,13 @@ function buildArithmetic(
 
   push(`Gross requirement, ${requirementDate}`, requirement, '', 'Bill-of-material explosion', {
     expandable: true,
+    precise: true,
   });
-  push('Safety stock', order.threshold, '+', `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`);
+  push('Safety stock', order.threshold, '+', `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`, {
+    precise: true,
+  });
   const required = requirement + order.threshold;
-  push('Required position', required, '=', null, { emphasis: true });
+  push('Required position', required, '=', null, { emphasis: true, precise: true });
 
   // The receipts actually landing that day, not a literal zero. Every material
   // with an inbound delivery in its requirement bucket printed `+0` here, under
@@ -962,42 +1036,78 @@ function buildArithmetic(
   const entering = order.balanceBefore + requirement - receipts;
   push(`Balance entering ${requirementDate}`, entering, '', 'Rolled from opening stock', {
     expandable: true,
+    precise: true,
   });
-  push('Scheduled receipts that day', receipts, '+', 'Open purchase order schedule lines');
+  push('Scheduled receipts that day', receipts, '+', 'Open purchase order schedule lines', { precise: true });
   const available = entering + receipts;
-  push('Available position', available, '=', null, { emphasis: true });
+  push('Available position', available, '=', null, { emphasis: true, precise: true });
 
   // Restated as its own subtraction rather than asserted. A line that claims to
   // be an equals sign has to be one.
-  push('Required position', required, '', 'From above');
-  push('Available position', available, '−', 'From above');
-  push('NET REQUIREMENT', order.netRequirement, '=', 'Required position less available position', { emphasis: true });
+  push('Required position', required, '', 'From above', { precise: true });
+  push('Available position', available, '−', 'From above', { precise: true });
+  push('NET REQUIREMENT', order.netRequirement, '=', 'Required position less available position', {
+    emphasis: true,
+    precise: true,
+  });
 
-  const lotSizing = Math.max(0, order.qty - order.netRequirement);
-  if (facts.itemPlant.minLotSize) {
-    const binding = order.netRequirement < facts.itemPlant.minLotSize;
+  // Every adjustment, as the run recorded it — not re-derived here.
+  //
+  // Re-deriving these from `netRequirement` alone is what printed
+  // `1 + 385 + 14` under a total of `800`: it modelled a minimum order quantity
+  // and a rounding value, and knew nothing about the POQ look-ahead that had
+  // actually produced the number, nor about scrap, vendor increments or a
+  // max-lot split. The trace is the only account of the quantity, so it is the
+  // one shown.
+  const shortage = requirementFor(context, facts, order);
+  const trace = shortage?.sizingTrace ?? [];
+
+  // Deltas are the difference between *rounded* running totals, not the rounded
+  // difference. Rounding each contribution independently is what let a column
+  // of 0.64 + 385 + 14 sit under a total of 400: the 385 was really 385.36, and
+  // the third of a unit it lost had nowhere to go. Taken this way the rows foot
+  // exactly, whatever precision they are shown at.
+  for (const step of trace) {
+    if (step.kind === 'MAX_LOT_SPLIT') continue;
+    const delta = round2(step.afterQty) - round2(step.beforeQty);
+
+    if (step.kind === 'RULE') {
+      // The rule's own contribution, above the ceilings it is then subject to.
+      if (delta !== 0) push(labelStep(step, uom), delta, '+', step.source, { precise: true });
+      continue;
+    }
+
+    // "Binding" and "changed the quantity" are not the same thing. Where a
+    // vendor increment and a material rounding value are reconciled together,
+    // both constrain the answer and only one moves it.
+    const source = delta !== 0 ? 'Binding' : step.binding ? 'Binding — met by the reconciled quantity' : 'Not binding';
+    push(labelStep(step, uom), delta === 0 ? null : delta, '+', source, { precise: true });
+  }
+
+  push('PLANNED ORDER RECEIPT', shortage?.finalOrderQuantity ?? order.qty, '=', null, {
+    emphasis: true,
+    precise: true,
+  });
+
+  // A split is a change of shape, not of quantity, so it sits under the total
+  // rather than inside the sum it would otherwise break.
+  const split = trace.find((step) => step.kind === 'MAX_LOT_SPLIT' && step.changedShape);
+  if (split) {
     push(
-      `Minimum order quantity ${format(facts.itemPlant.minLotSize)} ${uom}`,
-      binding ? facts.itemPlant.minLotSize - order.netRequirement : null,
-      '+',
-      binding ? 'Binding' : 'Not binding',
+      `Released as ${split.sliceQtys?.length ?? 0} orders — maximum lot ${format(split.parameter ?? 0)} ${uom}`,
+      null,
+      '',
+      (split.sliceQtys ?? []).map((slice) => format(slice)).join(' + '),
     );
   }
-  if (facts.itemPlant.roundingValue) {
-    const afterMoq = Math.max(order.netRequirement, facts.itemPlant.minLotSize ?? 0);
-    const rounded = Math.ceil(afterMoq / facts.itemPlant.roundingValue) * facts.itemPlant.roundingValue;
-    push(
-      `Rounding value ${format(facts.itemPlant.roundingValue)} ${uom}`,
-      rounded > afterMoq ? rounded - afterMoq : null,
-      '+',
-      rounded > afterMoq ? 'Binding' : 'Not binding',
-    );
-  }
-  push('PLANNED ORDER RECEIPT', order.qty, '=', null, { emphasis: true });
+
+  const lotSizing = Math.max(0, (shortage?.finalOrderQuantity ?? order.qty) - order.netRequirement);
   // Under the total, the way row 11 of the grid sits under row 10. Above it,
   // this restatement broke the running sum it was standing in the middle of.
   if (lotSizing > 0) {
-    push('of which added by a rule rather than by demand', lotSizing, '', 'Need and rule are never merged');
+    push('of which added by a rule rather than by demand', lotSizing, '', 'Need and rule are never merged', {
+      precise: true,
+    });
   }
 
   push(
@@ -1231,6 +1341,18 @@ function round(value: number): number {
 
 function round1(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+/**
+ * Two places, whatever the magnitude.
+ *
+ * `round` drops to whole units above 10, which is right for a balance and wrong
+ * for a column that has to add up: a 385.36 contribution printed as 385 leaves
+ * the total short by a third of a unit and the planner looking at arithmetic
+ * that does not work.
+ */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function format(value: number): string {
