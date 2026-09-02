@@ -34,6 +34,7 @@
 import { fromEpochDay, startOfWeek, toEpochDay, weekLabel } from '@repo/domain';
 
 import type { WorkingCalendar } from './calendar';
+import { receiptCeiling } from './receipt-constraints';
 
 /** Every reason a committed line can differ from the ideal one. */
 export type ConstraintKey =
@@ -650,37 +651,10 @@ function buildCommitted(input: DeliveryScheduleInput, weeks: WeekBucket[], ideal
    * because that is what has to fit on the floor once the week's consumption
    * has drawn it down.
    */
-  const ceilingOf = (openingBalance: number, requirement: number): { limit: number; binds: ConstraintKey | null } => {
-    let limit = Number.POSITIVE_INFINITY;
-    let binds: ConstraintKey | null = null;
-
-    if (input.storageCapacity !== null && input.storageCapacity > 0) {
-      limit = Math.max(0, input.storageCapacity - openingBalance + requirement);
-      binds = 'STORAGE_CAP';
-    }
-    // Shelf life is the raw material's version of the warehouse ceiling: not
-    // how much fits, but how much can be consumed before it stops being
-    // material. Expressed the same way — a ceiling on what the week closes on.
-    if (input.shelfLifeDays !== null && input.shelfLifeDays > 0 && input.dailyDemandMean > 0) {
-      const keeps = input.shelfLifeDays * input.dailyDemandMean;
-      const shelfLimit = Math.max(0, keeps - openingBalance + requirement);
-      if (shelfLimit < limit) {
-        limit = shelfLimit;
-        binds = 'SHELF_LIFE';
-      }
-    }
-    if (input.weeklyCapacity !== null && input.weeklyCapacity > 0 && input.weeklyCapacity < limit) {
-      limit = input.weeklyCapacity;
-      binds = 'VENDOR_CAPACITY';
-    }
-    // A ceiling on the delivery itself rather than on the position: tankage,
-    // a vessel parcel, whatever the maximum lot represents.
-    if (input.maxLotSize !== null && input.maxLotSize > 0 && input.maxLotSize < limit) {
-      limit = input.maxLotSize;
-      binds = 'MAX_LOT';
-    }
-    return { limit, binds };
-  };
+  // One implementation, shared with the recovery pass. Two copies of a ceiling
+  // is how a schedule and a recommendation come to disagree about the same week.
+  const ceilingOf = (openingBalance: number, requirement: number): { limit: number; binds: ConstraintKey | null } =>
+    receiptCeiling(input, openingBalance, requirement);
 
   /** Rolls the balances for the current quantities. */
   const roll = (): number[] => {

@@ -127,3 +127,17 @@ export {
   type PlanningException,
   type Severity,
 } from './exceptions';
+export {
+  planRecovery,
+  type BlockedRecovery,
+  type RecoveryInput,
+  type RecoveryOrder,
+  type RecoveryResult,
+} from './recovery';
+export {
+  checkReceipt,
+  receiptCeiling,
+  type ReceiptCeiling,
+  type ReceiptCeilingInput,
+  type ReceiptVerdict,
+} from './receipt-constraints';

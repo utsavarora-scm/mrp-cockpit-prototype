@@ -409,6 +409,7 @@ export function toMaterialContext(facts: MaterialFacts, plan: MrpResult): Materi
     plan: facts.plan,
     fences: facts.fences,
     orders: plan.orderExplanations.get(planKey(facts.itemId, facts.plantId)) ?? [],
+    recovery: plan.recoveries.get(planKey(facts.itemId, facts.plantId)) ?? null,
     dailyDemandMean: facts.dailyDemandMean,
     observedLeadTimeDays: facts.measured?.meanDays ?? null,
     maxNormDays: facts.itemPlant.maxNormDays,

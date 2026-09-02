@@ -32,7 +32,14 @@ import {
 import { buildCalendars, FALLBACK_CALENDAR, WorkingCalendar } from './calendar';
 import { consumeForecast } from './forecast-consumption';
 import { assignLowLevelCodes } from './low-level-codes';
-import { computeDaysOfCover, isPlanningActive, netItemPlant, type PlannedOrderDraft } from './netting';
+import {
+  computeDaysOfCover,
+  isPlanningActive,
+  netItemPlant,
+  releaseDayForReceipt,
+  type PlannedOrderDraft,
+} from './netting';
+import { planRecovery, type RecoveryResult } from './recovery';
 import { summariseObservedLeadTimes, type ObservedLeadTime } from './observed';
 
 /** Lookups the downstream engines need that are not already on MrpResult. */
@@ -68,6 +75,8 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
   const bomsByParent = groupBy(snapshot.boms, (b) => planKey(b.parentItemId, b.plantId));
   const bomsByComponent = groupBy(snapshot.boms, (b) => planKey(b.componentItemId, b.plantId));
   const vendorsByKey = groupBy(snapshot.itemVendors, (v) => planKey(v.itemId, v.plantId));
+  // The vendor master, for the shutdown weeks a recovery date has to clear.
+  const vendorById = new Map(snapshot.vendors.map((v) => [v.id, v]));
 
   const calendars = buildCalendars(snapshot.calendars, planningDate, horizonDays);
   const fallbackCalendar = new WorkingCalendar(FALLBACK_CALENDAR, planningDate, horizonDays);
@@ -231,6 +240,7 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
   const orderExplanations = new Map<string, PlannedOrderExplanation[]>();
   const requirementExplanations = new Map<string, RequirementExplanation[]>();
   const lotSizingConflicts = new Map<string, LotSizingConflict[]>();
+  const recoveries = new Map<string, RecoveryResult>();
 
   for (const key of order) {
     const plan = plans.get(key);
@@ -336,6 +346,60 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     }
     if (result.conflicts.length > 0) lotSizingConflicts.set(key, result.conflicts);
 
+    // What can still be done, where the plan asked for something in the past.
+    //
+    // A separate pass with its own freshly-rolled balance, leaving the past-due
+    // orders exactly as netting dated them. Only runs where there is something
+    // to recover — most materials have nothing unplaceable.
+    const unmet = result.orders.filter((draft) => draft.isReleaseInPast);
+    if (unmet.length > 0) {
+      const seen = new Set<string>();
+      const unmetRequirements: Array<{ requirementId: string; day: number }> = [];
+      for (const draft of unmet) {
+        if (seen.has(draft.requirementId)) continue;
+        seen.add(draft.requirementId);
+        unmetRequirements.push({ requirementId: draft.requirementId, day: draft.receiptDay });
+      }
+
+      recoveries.set(
+        key,
+        planRecovery({
+          itemId: itemPlant.itemId,
+          plantId: itemPlant.plantId,
+          itemPlant,
+          calendar,
+          planningEpochDay,
+          horizonDays,
+          openingStock: plan.openingStock,
+          standardCost: item.standardCost,
+          grossRequirements: plan.grossRequirements,
+          scheduledReceipts: plan.scheduledReceipts,
+          plannedReceipts: plan.plannedReceipts,
+          infeasibleReceipts: result.infeasibleReceipts,
+          thresholdAt: () => result.threshold,
+          earliestFeasibleReceiptDay: result.earliestFeasibleReceiptDay,
+          releaseDayFor: releaseDayForReceipt(
+            calendar,
+            itemPlant.procurementType !== 'MAKE',
+            effectiveLeadTimeDays + itemPlant.safetyTimeDays
+          ),
+          moq: vendor?.moq ?? 0,
+          incrementQty: vendor?.incrementQty ?? 0,
+          ceiling: {
+            weeklyCapacity: vendor?.weeklyCapacity ?? null,
+            storageCapacity: itemPlant.storageCapacity,
+            shelfLifeDays: item.shelfLifeDays,
+            maxLotSize: itemPlant.maxLotSize,
+            dailyDemandMean: meanDailyDemand(plan.grossRequirements, horizonDays),
+          },
+          shutdownMondays: new Set(
+            vendor?.vendorId ? (vendorById.get(vendor.vendorId)?.productionShutdownWeeks ?? []) : []
+          ),
+          unmetRequirements,
+        })
+      );
+    }
+
     for (let index = 0; index < result.orders.length; index += 1) {
       const draft = result.orders[index] as PlannedOrderDraft;
       const orderId = `PLO-${itemPlant.itemId}-${itemPlant.plantId}-${draft.receiptDay}-${index}`;
@@ -439,6 +503,7 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     orderExplanations,
     requirementExplanations,
     lotSizingConflicts,
+    recoveries,
     derivedDemand,
     circularItemPlants: circular,
   };
@@ -631,6 +696,13 @@ export function resolveLeadTime(
 function clampDay(day: number, min: number, max: number): number | null {
   if (day > max) return null;
   return day < min ? min : day;
+}
+
+/** Mean daily demand across the horizon — the base for cover-shaped ceilings. */
+function meanDailyDemand(grossRequirements: Float64Array, horizonDays: number): number {
+  let total = 0;
+  for (let day = 0; day <= horizonDays; day += 1) total += grossRequirements[day] as number;
+  return total / Math.max(horizonDays, 1);
 }
 
 function groupBy<T>(items: T[], keyOf: (item: T) => string): Map<string, T[]> {

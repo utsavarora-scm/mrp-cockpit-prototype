@@ -72,6 +72,7 @@ function context(overrides: Partial<MaterialContext> = {}): MaterialContext {
       horizonDays: HORIZON,
     }),
     orders: [],
+    recovery: null,
     dailyDemandMean: 10,
     observedLeadTimeDays: null,
     maxNormDays: null,
@@ -172,6 +173,86 @@ describe('3 — unreachable requirement', () => {
       HORIZON
     );
     expect(raised.find((entry) => entry.code === 'UNREACHABLE_REQUIREMENT')?.qtyAtStake).toBe(200);
+  });
+});
+
+describe('reachability, decided by what ordering actually closes', () => {
+  const balance = series(1_000);
+  balance[40] = -200;
+
+  /** A recovery pass that closed the whole exposure. */
+  const closed = {
+    orders: [
+      {
+        itemId: 'RM-1',
+        plantId: 'P1',
+        qty: 500,
+        slices: [500],
+        receiptDay: 30,
+        receiptDate: '2026-09-30',
+        releaseDate: '2026-08-31',
+        coversRequirementIds: ['RM-1@P1#20'],
+        sizingTrace: [],
+      },
+    ],
+    blocked: [],
+    projectedAvailableRecovered: series(1_000),
+    unavoidableQty: 0,
+    recoverableQty: 200,
+    residualQty: 0,
+    residualAfterFenceQty: 0,
+    firstResidualDay: -1,
+  };
+
+  it('is reachable when recovery closes it, whatever the bite day', () => {
+    const raised = raiseExceptions(
+      context({ plan: plan({ projectedAvailableFeasible: balance }), recovery: closed }),
+      HORIZON
+    );
+    const row = raised.find((entry) => entry.code === 'PROJECTED_STOCKOUT');
+    expect(row?.reachableByOrdering).toBe(true);
+    expect(row?.group).toBe('ORDER_NOW');
+  });
+
+  it('is not reachable when a constraint blocks the recovery, even past the fence', () => {
+    // The exposure bites on day 40, well right of a 30-day fence, so the old
+    // test would have called this reachable and told the planner to order. The
+    // vendor cannot make it.
+    const raised = raiseExceptions(
+      context({
+        plan: plan({ projectedAvailableFeasible: balance }),
+        recovery: {
+          ...closed,
+          orders: [],
+          recoverableQty: 0,
+          residualQty: 200,
+          residualAfterFenceQty: 200,
+          blocked: [{ receiptDay: 40, qty: 500, blockedBy: 'VENDOR_CAPACITY', detail: 'x' }],
+        },
+      }),
+      HORIZON
+    );
+    const row = raised.find((entry) => entry.code === 'PROJECTED_STOCKOUT');
+    expect(row?.reachableByOrdering).toBe(false);
+    expect(row?.group).toBe('CANNOT_ORDER');
+    // And it must not then tell anyone to place the order this week.
+    expect(row?.actions.join(' ')).not.toContain('Place the order this week');
+  });
+
+  it('never pairs an unreachable headline with an order-it-now action', () => {
+    for (const recovery of [
+      null,
+      { ...closed, orders: [], recoverableQty: 0, residualQty: 200, residualAfterFenceQty: 200 },
+    ]) {
+      const raised = raiseExceptions(
+        context({ plan: plan({ projectedAvailableFeasible: balance }), recovery }),
+        HORIZON
+      );
+      for (const row of raised) {
+        if (row.reachableByOrdering) continue;
+        expect(row.actions.join(' '), `${row.code} contradicts itself`).not.toContain('Place the order this week');
+      }
+    }
   });
 });
 

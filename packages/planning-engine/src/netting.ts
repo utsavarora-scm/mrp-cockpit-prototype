@@ -141,6 +141,39 @@ export interface NettingResult {
   requirements: RequirementDraft[];
   /** Parameter sets that could not be satisfied. A data-quality finding. */
   conflicts: LotSizingConflict[];
+  /**
+   * Planned receipts whose release date has already passed.
+   *
+   * Published so a recovery pass can roll its own balance from opening stock
+   * rather than adjusting `projectedAvailableFeasible`, which is already rolled.
+   */
+  infeasibleReceipts: Float64Array;
+  /**
+   * First day an order released today could land, under *this run's* lead time.
+   *
+   * Computed from the same offset and calendar walk netting uses, not from the
+   * maintained fence: under the measured-lead-time scenario the two differ, and
+   * a recovery dated off the wrong one is a date nobody can hit.
+   */
+  earliestFeasibleReceiptDay: number;
+}
+
+/**
+ * Back-scheduling, in the units the lead time is actually measured in.
+ *
+ * Exported so the recovery pass walks the same calendar netting did. Two
+ * implementations of this walk is how a proposal and the order it replaces come
+ * to disagree about which Monday they land on.
+ */
+export function releaseDayForReceipt(
+  calendar: WorkingCalendar,
+  isBought: boolean,
+  totalOffset: number
+): (receiptEpochDay: number) => number {
+  return (receiptEpochDay: number): number =>
+    isBought
+      ? calendar.previousWorkingDayOnOrBefore(receiptEpochDay - totalOffset)
+      : calendar.subtractWorkingDays(receiptEpochDay, totalOffset);
 }
 
 /** Items with no planning type, or explicitly excluded, are not netted. */
@@ -192,10 +225,7 @@ export function netItemPlant(input: NettingInput): NettingResult {
    * purchase order raised on a Sunday is one raised on Monday.
    */
   const isBought = itemPlant.procurementType !== 'MAKE';
-  const releaseDayFor = (receiptEpochDay: number): number =>
-    isBought
-      ? calendar.previousWorkingDayOnOrBefore(receiptEpochDay - totalOffset)
-      : calendar.subtractWorkingDays(receiptEpochDay, totalOffset);
+  const releaseDayFor = releaseDayForReceipt(calendar, isBought, totalOffset);
 
   const orders: PlannedOrderDraft[] = [];
   const requirements: RequirementDraft[] = [];
@@ -335,7 +365,17 @@ export function netItemPlant(input: NettingInput): NettingResult {
     firstUncoveredDay: firstBreachDay,
     requirements,
     conflicts,
+    infeasibleReceipts,
+    earliestFeasibleReceiptDay: earliestFeasibleReceiptDay(),
   };
+
+  /** The first receipt day whose release date is today or later. */
+  function earliestFeasibleReceiptDay(): number {
+    for (let day = 0; day <= horizonDays; day += 1) {
+      if (releaseDayFor(planningEpochDay + day) >= planningEpochDay) return day;
+    }
+    return horizonDays;
+  }
 }
 
 /**

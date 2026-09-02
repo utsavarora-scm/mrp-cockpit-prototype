@@ -18,7 +18,7 @@
  * because a planner's morning is a sequence of phone calls and not a taxonomy.
  */
 
-import type { ItemPlant, ItemPlantPlan, ItemVendor, PlannedOrderExplanation } from '@repo/domain';
+import type { ItemPlant, ItemPlantPlan, ItemVendor, MaterialRecovery, PlannedOrderExplanation } from '@repo/domain';
 
 import type { Fence, FenceSet } from './fences';
 
@@ -118,6 +118,16 @@ export interface MaterialContext {
   plan: ItemPlantPlan;
   fences: FenceSet;
   orders: PlannedOrderExplanation[];
+  /**
+   * What can still be done where the plan asked for an order in the past.
+   *
+   * Absent where nothing is unplaceable. Where present, the split between
+   * unavoidable and recoverable is what decides whether a row belongs under
+   * "cannot be fixed by ordering" — rather than the bite date's position
+   * relative to the fence, which says only when the exposure starts and nothing
+   * about whether an order reaches it.
+   */
+  recovery: MaterialRecovery | null;
   dailyDemandMean: number;
   /** Mean total lead time from matched receipts, where there are enough. */
   observedLeadTimeDays: number | null;
@@ -247,7 +257,20 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
   }
 
   const biteDay = firstStockoutDay !== -1 ? firstStockoutDay : firstBreachDay;
-  const reachable = biteDay === -1 ? true : biteDay >= fence.earliestReceiptDay;
+
+  // Whether ordering helps, decided by whether ordering actually closes it.
+  //
+  // This used to be `biteDay >= fence.earliestReceiptDay` — a statement about
+  // when the exposure starts, not about whether an order reaches it. That is
+  // how a card came to wear "Reachable by ordering" above a headline saying the
+  // balance stays out *after* every order that can still be placed: the two
+  // sentences were answering different questions, and neither was the
+  // planner's. Where a recovery pass has run, the residual it could not close —
+  // whether because nothing lands in time or because a constraint blocked it —
+  // is what decides the group.
+  const recovery = context.recovery;
+  const reachable =
+    biteDay === -1 ? true : recovery ? recovery.residualAfterFenceQty <= 0 : biteDay >= fence.earliestReceiptDay;
 
   // ---- Projected stock-out -------------------------------------------------
   if (firstStockoutDay !== -1) {
@@ -255,10 +278,18 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
       code: 'PROJECTED_STOCKOUT',
       group: reachable ? 'ORDER_NOW' : 'CANNOT_ORDER',
       severity: 'CRITICAL',
-      headline: `${context.description} runs out, and stays out: the balance reaches ${round(-worstStockoutQty)} ${context.baseUom} at its worst, even after every order that can still be placed.`,
+      // Two clauses on two clearly different measures, rather than one subtraction
+      // across bases. The trough is a depth below zero; the recovery figures are
+      // shortfalls against the norm, and adding them to each other — or to the
+      // trough — produced numbers larger than the exposure they described.
+      headline: recovery
+        ? recovery.residualQty <= 0
+          ? `${context.description} runs out: the balance reaches ${round(-worstStockoutQty)} ${context.baseUom} at its worst. Ordering everything still placeable clears it.`
+          : `${context.description} runs out: the balance reaches ${round(-worstStockoutQty)} ${context.baseUom} at its worst. Ordering everything still placeable lifts the shortfall against the norm to ${round(recovery.residualQty)} ${context.baseUom}, and no further.`
+        : `${context.description} runs out, and stays out: the balance reaches ${round(-worstStockoutQty)} ${context.baseUom} at its worst, even after every order that can still be placed.`,
       biteDay: firstStockoutDay,
       qtyAtStake: worstStockoutQty,
-      reachableByOrdering: firstStockoutDay >= fence.earliestReceiptDay,
+      reachableByOrdering: reachable,
       operands: [
         { label: 'Opening stock', value: plan.openingStock, source: 'Stock on hand, unrestricted' },
         { label: 'Safety stock', value: safetyStock, source: 'Material master' },
@@ -267,6 +298,28 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
           value: -worstStockoutQty,
           source: 'Projected balance after every order that can still be placed',
         },
+        ...(recovery
+          ? [
+              {
+                label: 'Worst shortfall against the norm, closed by ordering now',
+                value: recovery.recoverableQty,
+                source: 'Recovery orders that clear the lead time and every capacity check',
+              },
+              {
+                label: 'Worst shortfall still standing after that',
+                value: recovery.residualQty,
+                source:
+                  recovery.blocked.length > 0
+                    ? `${recovery.blocked.length} candidate${recovery.blocked.length === 1 ? '' : 's'} blocked by ${recovery.blocked[0]?.blockedBy ?? 'a constraint'}`
+                    : 'Nothing ordered now lands before the exposure bites',
+              },
+              {
+                label: 'Of which falls before anything could land',
+                value: recovery.unavoidableQty,
+                source: 'Inside the lead-time fence — no order reaches these days',
+              },
+            ]
+          : []),
         { label: 'Earliest a new order could land', value: fence.earliestReceiptDay, source: 'Lead-time chain' },
       ],
       actions: actionsFor(context, firstStockoutDay, fence),
@@ -548,7 +601,23 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
   }
 
   // ---- Excess and obsolescence --------------------------------------------
-  const closingCover = plan.daysOfCover[0] as number;
+  //
+  // Measured on supply that could actually turn up.
+  //
+  // `plan.daysOfCover` is rolled off `projectedAvailable`, which counts every
+  // planned order including the ones whose release date has passed. So an
+  // unplaceable proposal manufactured its own excess exception: RM-30137 was
+  // told it held 27 days of cover against an 18-day norm, ₹2.96 Cr of it, on the
+  // strength of 800 MT nobody could order — while a second card on the same
+  // material said it was critically short.
+  //
+  // A *feasible* recommendation creating excess is a different thing and stays:
+  // a 1,000 MT vessel parcel to close a 120 MT gap really does leave the cover
+  // it leaves, and that is a trade-off worth showing rather than an artefact.
+  const executableBalance = recovery
+    ? (recovery.projectedAvailableRecovered[0] as number)
+    : (plan.projectedAvailableFeasible[0] as number);
+  const closingCover = coverAt(executableBalance, plan.grossRequirements, 0, horizonDays);
   if (context.maxNormDays !== null && closingCover > context.maxNormDays * EXCESS_MULTIPLE) {
     const excessQty = (closingCover - context.maxNormDays) * context.dailyDemandMean;
     emit({
@@ -704,38 +773,119 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
  */
 function actionsFor(context: MaterialContext, biteDay: number, fence: Fence): string[] {
   const actions: string[] = [];
-  const reachable = biteDay >= fence.earliestReceiptDay;
+  const recovery = context.recovery;
+
+  // The same test the grouping uses, so a row cannot say "nothing reaches this"
+  // in its headline and "place the order this week" in its first bullet.
+  const reachable = recovery ? recovery.residualAfterFenceQty <= 0 : biteDay >= fence.earliestReceiptDay;
+
+  if (recovery && recovery.orders.length > 0) {
+    const first = recovery.orders[0] as { qty: number; receiptDate: string; releaseDate: string };
+    actions.push(
+      `Raise ${round(first.qty)} ${context.baseUom} now for ${first.receiptDate} — release by ${first.releaseDate}. That is the earliest anything ordered today can land.`
+    );
+  }
 
   if (!reachable) {
     actions.push(
       `Nothing ordered today lands before day ${fence.earliestReceiptDay}. This exposure has to be closed another way.`
     );
-    const confirmed = context.openLines.filter((line) => line.tier === 1 && line.expectedDay >= 0);
-    if (confirmed.length > 0) {
-      const line = confirmed[0] as OpenLineContext;
-      actions.push(
-        `Expedite discharge and quality release on ${line.orderId} line ${line.line} to buy days at the front.`
-      );
-    }
-    const unacknowledged = context.openLines.filter((line) => line.tier === 2 && line.expectedDay >= 0);
-    if (unacknowledged.length > 0) {
-      const line = unacknowledged[0] as OpenLineContext;
-      actions.push(
-        `Get ${line.orderId} line ${line.line} acknowledged and pull it forward — it is the only supply that can reach the later weeks.`
-      );
-    }
+
+    // Lines are picked by date and by stage, not by their position in the
+    // snapshot array. Naming a line that is already as early as it can be — or
+    // asking for discharge on one that has already been received — is how a
+    // queue teaches a planner to stop reading it.
+    for (const action of expediteActions(context, biteDay)) actions.push(action);
+
     const sibling = context.categorySiblings.sort((a, b) => a.earliestReceiptDay - b.earliestReceiptDay)[0];
     if (sibling && sibling.earliestReceiptDay < fence.earliestReceiptDay) {
       actions.push(
         `Order ${sibling.itemId} — same chemistry, ${sibling.leadTimeDays}-day lead time — for the weeks it can cover.`
       );
     }
+
+    if (recovery && recovery.blocked.length > 0) {
+      const blocked = recovery.blocked[0] as { blockedBy: string | null; receiptDay: number };
+      actions.push(
+        `An order for day ${blocked.receiptDay} would be refused by ${CONSTRAINT_PROSE[blocked.blockedBy ?? ''] ?? 'a capacity limit'}. Clear that before it can help.`
+      );
+    }
+
     actions.push('Commit the weeks beyond the fence now, so the same conversation does not happen again in a month.');
-  } else {
+  } else if (!recovery || recovery.orders.length === 0) {
     actions.push('Place the order this week — the last responsible order date is now.');
   }
 
   return actions;
+}
+
+/** Plain words for a constraint key, where one has to appear in a sentence. */
+const CONSTRAINT_PROSE: Record<string, string> = {
+  VENDOR_CAPACITY: "the vendor's weekly capacity",
+  VENDOR_SHUTDOWN: "the vendor's plant shutdown",
+  STORAGE_CAP: 'the storage ceiling',
+  SHELF_LIFE: 'shelf life',
+  MAX_LOT: 'the maximum lot size',
+  RECEIVING_CAPACITY: 'the receiving dock',
+};
+
+/**
+ * Which open lines are worth chasing, and what to ask of them.
+ *
+ * Three rules the old version had none of. A line only helps if it lands
+ * *after* the exposure bites — one already due earlier is not the problem. A
+ * line that has been goods-received cannot be expedited into the warehouse
+ * twice. And what to ask depends on where the line is: a vessel at anchor needs
+ * discharge and quality release, an unacknowledged order needs a vendor.
+ */
+function expediteActions(context: MaterialContext, biteDay: number): string[] {
+  const actions: string[] = [];
+  const byDate = (a: OpenLineContext, b: OpenLineContext): number => a.expectedDay - b.expectedDay;
+
+  // Already moving, not yet received: the lever is logistics and QA, not the vendor.
+  const inFlight = context.openLines
+    .filter((line) => line.tier === 1 && line.expectedDay >= 0 && !line.hasGrn && line.expectedDay > biteDay)
+    .sort(byDate);
+  if (inFlight.length > 0) {
+    const line = inFlight[0] as OpenLineContext;
+    actions.push(
+      `Expedite discharge and quality release on ${line.orderId} line ${line.line}, due ${line.expectedDate}, to buy days at the front.`
+    );
+  }
+
+  // Nobody has acknowledged it, so the date is not yet real. That is a vendor
+  // conversation, and it is the one worth having first.
+  const unacknowledged = context.openLines
+    .filter((line) => line.tier === 2 && line.expectedDay >= 0 && !line.hasGrn && line.expectedDay > biteDay)
+    .sort(byDate);
+  if (unacknowledged.length > 0) {
+    const line = unacknowledged[0] as OpenLineContext;
+    actions.push(
+      `Get ${line.orderId} line ${line.line} acknowledged and pulled in from ${line.expectedDate} — it lands after the position needs it.`
+    );
+  }
+
+  return actions;
+}
+
+/**
+ * Forward days of demand a balance covers, from one day.
+ *
+ * The published `daysOfCover` series answers the same question against a
+ * different balance — one that counts orders nobody can place. Where the
+ * question is "how much cover does this material actually have", the balance has
+ * to be one that can actually arrive.
+ */
+function coverAt(balance: number, grossRequirements: Float64Array, fromDay: number, horizonDays: number): number {
+  if (balance <= 0) return 0;
+  let remaining = balance;
+  for (let day = fromDay; day <= horizonDays; day += 1) {
+    const demand = grossRequirements[day] as number;
+    if (demand <= 0) continue;
+    if (remaining < demand) return day - fromDay + remaining / demand;
+    remaining -= demand;
+  }
+  return horizonDays - fromDay;
 }
 
 function dayOffsetOfRelease(order: PlannedOrderExplanation): number {

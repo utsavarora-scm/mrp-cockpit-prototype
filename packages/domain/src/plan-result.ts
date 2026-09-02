@@ -162,6 +162,60 @@ export interface RequirementExplanation {
 }
 
 /**
+ * An order that could actually be placed, standing in for ones that cannot.
+ *
+ * Not a redate of the order it replaces: the quantity is recalculated at the
+ * feasible date, because the demand and receipts in between change what is
+ * needed. The original keeps its own date and its own impossible release date.
+ */
+export interface RecoveryOrderResult {
+  itemId: string;
+  plantId: string;
+  /** The reconciled total. `slices` sum to this. */
+  qty: number;
+  slices: number[];
+  receiptDay: number;
+  receiptDate: string;
+  releaseDate: string;
+  /** The unmet requirements this one order stands in for. */
+  coversRequirementIds: string[];
+  sizingTrace: LotSizingStep[];
+}
+
+/** A candidate that cleared the lead time and failed something else. */
+export interface BlockedRecoveryResult {
+  receiptDay: number;
+  qty: number;
+  /** A `ConstraintKey` from the schedule builder's vocabulary. */
+  blockedBy: string | null;
+  detail: string;
+}
+
+/**
+ * What can still be done about a plan that asked for orders in the past.
+ *
+ * The split between `unavoidableQty` and `recoverableQty` is what lets an
+ * exception say whether ordering helps, instead of deciding it from whether the
+ * bite date happens to fall right of the fence.
+ */
+export interface MaterialRecovery {
+  orders: RecoveryOrderResult[];
+  blocked: BlockedRecoveryResult[];
+  /** Rolled fresh from opening stock, never adjusted off another series. */
+  projectedAvailableRecovered: Float64Array;
+  /** Deficit before the earliest feasible receipt. No order reaches this. */
+  unavoidableQty: number;
+  /** How much of the worst shortfall constraint-cleared ordering removes. */
+  recoverableQty: number;
+  /** Worst shortfall still standing after that, across the whole horizon. */
+  residualQty: number;
+  /** The part of that falling on days an order could actually have landed on. */
+  residualAfterFenceQty: number;
+  /** First day the recovered balance is still short, or −1. */
+  firstResidualDay: number;
+}
+
+/**
  * The working behind one recommended order.
  *
  * Netting knows why it raised an order — the threshold it was defending, the
@@ -215,8 +269,15 @@ export interface MrpResult {
   orderExplanations: Map<string, PlannedOrderExplanation[]>;
   /** Keyed by `planKey` — one entry per shortage, carrying the sizing trace. */
   requirementExplanations: Map<string, RequirementExplanation[]>;
-  /** Keyed by `planKey` — parameter sets that could not be satisfied. */
+  /**
+   * Keyed by `planKey` — parameter sets that could not be satisfied.
+   */
   lotSizingConflicts: Map<string, LotSizingConflict[]>;
+  /**
+   * Keyed by `planKey` — what can still be done where the plan asked for an
+   * order in the past. Absent for materials with nothing to recover.
+   */
+  recoveries: Map<string, MaterialRecovery>;
   /** Dependent demand the engine generated while exploding BOMs. */
   derivedDemand: DemandElement[];
   /** Item-plants whose BOM participates in a cycle — planned around, not thrown on. */
