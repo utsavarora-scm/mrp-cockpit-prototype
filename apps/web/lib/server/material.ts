@@ -118,7 +118,7 @@ export function materialDetail(scenarioId: string, itemId: string, plantId: stri
     firstStockoutDate: dayToDate(facts.firstStockoutDay, context),
     daysOfCoverToday: round1(facts.daysOfCoverToday),
 
-    recommendation: buildRecommendation(explanations, facts, context),
+    recommendation: buildRecommendation(explanations, facts),
     orders: buildOrders(facts, context),
     exceptions: exceptionsFor(facts, context),
   };
@@ -567,13 +567,10 @@ function toLineView(
   };
 }
 
-function buildRecommendation(
-  explanations: PlannedOrderExplanation[],
-  facts: MaterialFacts,
-  context: RunContext,
-): RecommendationView | null {
+function buildRecommendation(explanations: PlannedOrderExplanation[], facts: MaterialFacts): RecommendationView | null {
   const first = explanations[0];
   if (!first) return null;
+  // The release day the walk produced, not a re-derivation from the receipt day.
   const releaseDay = first.releaseDay;
   void facts;
   return {
