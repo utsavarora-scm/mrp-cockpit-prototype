@@ -312,10 +312,18 @@ describe('BOM explosion', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('order supersession', () => {
-  it('does not raise an order when existing supply already restores the buffer', () => {
-    // A ten-day lead time puts the release date in the past, which is the case
-    // worth reporting: no order was placeable, and existing supply saves it.
+describe('netting does not look ahead', () => {
+  it('raises the requirement even when a later receipt would have restored the buffer', () => {
+    // The buffer breaches on day 3; a purchase order lands on day 4 and lifts
+    // the balance clear again. Netting used to scan forward, find that receipt
+    // and file the requirement as superseded — which is how the worked example
+    // lost its headline order, because the line that "covered" week 39 was a
+    // week-41 delivery nobody had acknowledged.
+    //
+    // A receipt landing after the bucket cannot mean the bucket needed nothing.
+    // It means an existing order is later than the position requires, which is
+    // a pull-in — a different finding, raised by the exception engine, and not
+    // netting's to silently decide.
     const base = snapshot({
       items: [item({ id: 'X' })],
       itemPlants: [itemPlant({ itemId: 'X', plantId: 'P1', safetyStock: 100, leadTimeDays: 10 })],
@@ -325,7 +333,42 @@ describe('order supersession', () => {
     });
 
     const plan = runMrp(base, options());
-    expect(plan.plannedOrders).toHaveLength(0);
+    expect(plan.plannedOrders.length).toBeGreaterThan(0);
+
+    // And it is honest about being unplaceable: a ten-day chain against a
+    // day-3 requirement is a release date a week into the past.
+    const explanations = plan.orderExplanations.get('X@P1') ?? [];
+    expect(explanations[0]?.isReleaseInPast).toBe(true);
+  });
+
+  it('reports each bucket‘s own requirement, not the same gap repeated daily', () => {
+    // Nothing can be ordered in time here, so the balance stays under the
+    // threshold for days on end. The series has to carry the *growth* in the
+    // shortfall, or a weekly bucket sums seven days of the same gap and reports
+    // seven times the requirement.
+    const base = snapshot({
+      items: [item({ id: 'X' })],
+      itemPlants: [
+        itemPlant({ itemId: 'X', plantId: 'P1', safetyStock: 100, leadTimeDays: 10, isPlanningRelevant: false }),
+      ],
+      stock: [stock('X', 'P1', 150)],
+      demand: dailyDemand('X', 'P1', 20, 1, 10),
+    });
+
+    const plan = runMrp(base, options());
+    const series = plan.plans.get('X@P1')?.netRequirements as Float64Array;
+
+    // Balance falls 20 a day from 150. It crosses 100 on day 3 (110 → 90), so
+    // the first requirement is 10, and every day after it is the day's 20.
+    expect(series[2]).toBe(0);
+    expect(series[3]).toBeCloseTo(10, 6);
+    expect(series[4]).toBeCloseTo(20, 6);
+    expect(series[5]).toBeCloseTo(20, 6);
+
+    // Which is the whole point: the week's total is the week's requirement.
+    let week = 0;
+    for (let day = 0; day <= 6; day += 1) week += series[day] as number;
+    expect(week).toBeCloseTo(70, 6);
   });
 
   it('still raises an order when the gap goes negative before supply arrives', () => {

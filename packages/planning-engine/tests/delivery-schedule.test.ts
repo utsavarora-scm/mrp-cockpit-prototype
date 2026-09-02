@@ -53,6 +53,10 @@ function bottleCampaign(overrides: Partial<DeliveryScheduleInput> = {}): Deliver
     weeklyCapacity: 250_000,
     storageCapacity: 320_000,
     minGapDays: 4,
+    dailyReceivingCapacity: 120_000,
+    shelfLifeDays: null,
+    qaQuarantineDays: 1,
+    sourceSplit: [],
     transitDays: 2,
     earliestReceiptDay: 10,
     productionShutdownWeeks: ['2026-09-21'],
@@ -231,5 +235,264 @@ describe('a shutdown the schedule can absorb entirely', () => {
     expect(touched.length).toBeLessThanOrEqual(2);
     expect(Math.round(result.totals.delta)).toBe(0);
     expect(result.residual).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No unattributed deltas, and no quantity quietly deleted
+// ---------------------------------------------------------------------------
+
+describe('the invariant the module is written around', () => {
+  it('names a constraint for every moved unit, or refuses to send the schedule', () => {
+    const result = buildDeliverySchedule(bottleCampaign());
+
+    for (const delta of result.deltas) {
+      expect(delta.constraint, `${delta.week} moved ${delta.delta} with no cause`).not.toBeNull();
+      expect(delta.note.length).toBeGreaterThan(0);
+    }
+    expect(result.blockingViolations).toEqual([]);
+  });
+
+  it('raises a blocking violation rather than guessing when it cannot attribute one', () => {
+    // A guessed attribution is worse than an empty field: it prints a
+    // constraint the panel beside it may not even list, in the one place the
+    // product is asking to be trusted. So the schedule is refused instead.
+    const result = buildDeliverySchedule(bottleCampaign());
+    const unattributed = result.deltas.filter((delta) => delta.constraint === null);
+    expect(result.blockingViolations.filter((row) => row.constraint === 'UNATTRIBUTED')).toHaveLength(
+      unattributed.length
+    );
+  });
+
+  it('keeps the totals footing across every plausible parameter set', () => {
+    // A sweep rather than one case: the conservation bug that shipped was a
+    // sub-minimum line being zeroed without the quantity going anywhere, and it
+    // only appeared at a minimum the worked example never reaches.
+    for (const moq of [0, 50_000, 100_000, 175_000]) {
+      for (const capacity of [null, 150_000, 250_000]) {
+        for (const storage of [null, 260_000, 320_000, 500_000]) {
+          const result = buildDeliverySchedule(
+            bottleCampaign({ moq, weeklyCapacity: capacity, storageCapacity: storage })
+          );
+          const label = `moq ${moq}, capacity ${capacity}, storage ${storage}`;
+          const lost = result.totals.ideal - result.totals.committed;
+          const unplaced = result.blockingViolations
+            .filter((row) => row.constraint === 'UNPLACEABLE')
+            .reduce((sum, row) => sum + row.qty, 0);
+
+          // Either the quantity is on the schedule, or it is named as quantity
+          // that could not be placed. It never simply stops existing.
+          expect(Math.abs(lost - unplaced), label).toBeLessThan(1);
+        }
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The planner's own edits
+// ---------------------------------------------------------------------------
+
+describe('a line the planner sets by hand', () => {
+  it('comes back exactly as typed, whatever the engine would have preferred', () => {
+    const result = buildDeliverySchedule(bottleCampaign({ plannerLines: [{ line: 30, qty: 150_000 }] }));
+    expect(result.committed.find((line) => line.line === 30)?.qty).toBe(150_000);
+  });
+
+  it('names the constraint it breaks, against the line that broke it', () => {
+    // W39 is the vendor's shutdown week and the plant is already near its
+    // ceiling. Both are the planner's to override; neither is silently allowed.
+    const result = buildDeliverySchedule(bottleCampaign({ plannerLines: [{ line: 30, qty: 150_000 }] }));
+    const raised = result.blockingViolations.filter((row) => row.line === 30);
+
+    expect(raised.map((row) => row.constraint)).toContain('VENDOR_SHUTDOWN');
+    for (const violation of raised) expect(violation.message.length).toBeGreaterThan(0);
+  });
+
+  it('names a broken minimum and a broken pallet multiple', () => {
+    const result = buildDeliverySchedule(bottleCampaign({ plannerLines: [{ line: 60, qty: 35_555 }] }));
+    const raised = result.blockingViolations.filter((row) => row.line === 60).map((row) => row.constraint);
+
+    expect(raised).toContain('MOQ');
+    expect(raised).toContain('ROUNDING');
+  });
+
+  it('names the warehouse ceiling when an edit puts too much on the floor', () => {
+    const result = buildDeliverySchedule(bottleCampaign({ plannerLines: [{ line: 10, qty: 400_000 }] }));
+    const raised = result.blockingViolations.filter((row) => row.line === 10);
+
+    expect(raised.map((row) => row.constraint)).toContain('STORAGE_CAP');
+    expect(raised.find((row) => row.constraint === 'STORAGE_CAP')?.message).toMatch(/320,000|3,20,000/);
+  });
+
+  it('offers what it would have done elsewhere rather than doing it', () => {
+    const result = buildDeliverySchedule(bottleCampaign({ plannerLines: [{ line: 10, qty: 100_000 }] }));
+
+    // The edited line is untouched; the rebalance is a proposal on the others.
+    expect(result.committed.find((line) => line.line === 10)?.qty).toBe(100_000);
+    expect(result.proposedCorrections.every((row) => row.line !== 10)).toBe(true);
+    for (const correction of result.proposedCorrections) expect(correction.reason.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Blocking against advisory
+// ---------------------------------------------------------------------------
+
+describe('what stops a schedule going out, and what does not', () => {
+  it('treats the worked example‘s residual exposure as a finding, not an error', () => {
+    // The whole point of the packaging example is that it ends 20,000 short of
+    // the buffer for two weeks and that this is the honest answer. Blocking on
+    // it would mean the only sendable schedule is one with nothing to say.
+    const result = buildDeliverySchedule(bottleCampaign());
+
+    expect(result.blockingViolations).toEqual([]);
+    expect(result.advisories.some((row) => row.kind === 'RESIDUAL_EXPOSURE')).toBe(true);
+    expect(result.advisories.find((row) => row.kind === 'RESIDUAL_EXPOSURE')?.message).toMatch(/20,000|safety stock/);
+  });
+
+  it('reports a line inside the fence as an advisory, and leaves the date alone', () => {
+    const result = buildDeliverySchedule(bottleCampaign({ earliestReceiptDay: 25 }));
+    const inside = result.committed.filter((line) => line.insideFence);
+
+    expect(inside.length).toBeGreaterThan(0);
+    for (const line of inside) {
+      expect(result.advisories.some((row) => row.kind === 'INSIDE_FENCE' && row.line === line.line)).toBe(true);
+    }
+    // Flagged, never quietly pushed out to the first date that works.
+    expect(result.committed.map((line) => line.week)).toEqual(['W37', 'W38', 'W39', 'W40', 'W41', 'W42']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The constraint set of §6.2, one case each
+// ---------------------------------------------------------------------------
+//
+// A matrix rather than a sample. The shelf-life and shipment-gap logic existed
+// in a module nothing on this path imported, and the gap was reported as slack
+// whatever the schedule did — both invisible because nothing enumerated the
+// list the requirements document actually asks for.
+
+describe('§6.2 — minimum gap between deliveries', () => {
+  it('merges a delivery that crowds the one before it, and says so', () => {
+    // Deliveries land weekly, so a ten-day minimum cannot be met by two
+    // consecutive weeks: the second is folded back rather than dribbled out.
+    const result = buildDeliverySchedule(bottleCampaign({ minGapDays: 10 }));
+    const gap = result.constraints.find((row) => row.key === 'MIN_GAP');
+
+    expect(gap?.binding).toBe(true);
+    const delivered = result.committed.filter((line) => line.qty > 0).map((line) => line.deliveryDay);
+    for (let index = 1; index < delivered.length; index += 1) {
+      expect((delivered[index] as number) - (delivered[index - 1] as number)).toBeGreaterThanOrEqual(10);
+    }
+  });
+
+  it('reports it as slack when the schedule already clears it', () => {
+    const result = buildDeliverySchedule(bottleCampaign());
+    expect(result.constraints.find((row) => row.key === 'MIN_GAP')?.binding).toBe(false);
+  });
+});
+
+describe('§6.2 — maximum lot', () => {
+  it('ceilings a delivery, and does it after the pull-forward as well as before', () => {
+    const result = buildDeliverySchedule(bottleCampaign({ maxLotSize: 200_000 }));
+
+    for (const line of result.committed) expect(line.qty).toBeLessThanOrEqual(200_000);
+    expect(result.constraints.find((row) => row.key === 'MAX_LOT')?.binding).toBe(true);
+  });
+});
+
+describe('§6.2 — shelf life', () => {
+  it('ceilings forward cover the way the warehouse ceilings holding', () => {
+    // Two days of shelf life on a 30,000-a-day mover leaves room for almost
+    // nothing, whatever the floor could hold.
+    const result = buildDeliverySchedule(
+      bottleCampaign({ storageCapacity: null, weeklyCapacity: null, shelfLifeDays: 2, moq: 0, roundingValue: null })
+    );
+
+    expect(result.constraints.find((row) => row.key === 'SHELF_LIFE')?.binding).toBe(true);
+    // Shelf life ceilings what can be *added*, not what is already on the
+    // floor: two days of cover cannot un-buy the 260,000 the campaign opens
+    // with. So nothing the schedule delivers may lift the position at all.
+    for (const line of result.committed) expect(line.balanceAfter).toBeLessThanOrEqual(260_000);
+    expect(result.totals.committed).toBeLessThan(result.totals.ideal);
+  });
+
+  it('is reported and does not bind where the material keeps long enough', () => {
+    const result = buildDeliverySchedule(bottleCampaign({ shelfLifeDays: 365 }));
+    const shelfLife = result.constraints.find((row) => row.key === 'SHELF_LIFE');
+    expect(shelfLife).toBeDefined();
+    expect(shelfLife?.binding).toBe(false);
+  });
+});
+
+describe('§6.2 — daily receiving capacity', () => {
+  it('says how many days a delivery takes to clear the dock', () => {
+    const result = buildDeliverySchedule(bottleCampaign());
+    const biggest = result.committed.reduce((max, line) => Math.max(max, line.qty), 0);
+
+    // 240,000 at 120,000 a day is two days on the dock, not a reason to order
+    // less — the receiving rate spreads the unload, it does not cap the line.
+    expect(biggest).toBe(240_000);
+    expect(result.committed.find((line) => line.qty === biggest)?.unloadDays).toBe(2);
+    expect(result.constraints.find((row) => row.key === 'RECEIVING_CAPACITY')?.binding).toBe(true);
+  });
+});
+
+describe('§6.2 — quality inspection', () => {
+  it('separates the day it arrives from the day it can be used', () => {
+    const result = buildDeliverySchedule(bottleCampaign({ qaQuarantineDays: 3 }));
+
+    for (const line of result.committed) {
+      expect(line.availableDate > line.deliveryDate, `${line.week}: ${line.deliveryDate} → ${line.availableDate}`).toBe(
+        true
+      );
+    }
+    expect(result.constraints.find((row) => row.key === 'QA_QUARANTINE')?.binding).toBe(true);
+  });
+});
+
+describe('§6.2 — source split', () => {
+  it('divides every line across its sources, and the parts sum to the line', () => {
+    const result = buildDeliverySchedule(
+      bottleCampaign({
+        sourceSplit: [
+          { vendorId: 'V-A', vendorName: 'Primary', share: 0.6 },
+          { vendorId: 'V-B', vendorName: 'Secondary', share: 0.4 },
+        ],
+      })
+    );
+
+    for (const line of result.committed) {
+      if (line.qty === 0) continue;
+      expect(line.split).toHaveLength(2);
+      expect(line.split.reduce((sum, part) => sum + part.qty, 0)).toBe(line.qty);
+    }
+    expect(result.constraints.find((row) => row.key === 'SOURCE_SPLIT')?.binding).toBe(true);
+  });
+
+  it('does not split a line that has one source', () => {
+    const result = buildDeliverySchedule(bottleCampaign());
+    for (const line of result.committed) expect(line.split).toEqual([]);
+  });
+});
+
+describe('§6.2 — calendars and transit', () => {
+  it('dates every delivery on a day the plant can receive on', () => {
+    const fiveDay = new WorkingCalendar({ id: 'CAL5', workingDays: [1, 2, 3, 4, 5], holidays: [] }, PLANNING_DATE, 400);
+    const result = buildDeliverySchedule(bottleCampaign({ plantCalendar: fiveDay }));
+
+    for (const line of result.committed) {
+      const day = (toEpochDay(line.deliveryDate) + 4) % 7;
+      expect(day, `${line.week} lands on a closed day`).toBeGreaterThan(0);
+      expect(day).toBeLessThan(6);
+    }
+  });
+
+  it('backs the dispatch date off the delivery date by the transit time', () => {
+    const result = buildDeliverySchedule(bottleCampaign({ transitDays: 5 }));
+    for (const line of result.committed) {
+      expect(toEpochDay(line.deliveryDate) - toEpochDay(line.dispatchDate)).toBeGreaterThanOrEqual(5);
+    }
   });
 });

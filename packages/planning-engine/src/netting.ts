@@ -25,9 +25,6 @@ const EPSILON = 1e-6;
 /** Backstop against a pathological parameter set producing endless orders. */
 const MAX_ORDERS_PER_ITEM_PLANT = 400;
 
-/** How far ahead existing supply is allowed to be and still count as covering. */
-const COVERAGE_LOOKAHEAD_DAYS = 14;
-
 export interface PlannedOrderDraft {
   itemId: string;
   plantId: string;
@@ -84,26 +81,8 @@ export interface NettingInput {
   sourcePlantId: string | null;
 }
 
-/**
- * A net requirement the engine chose not to order for, because supply already on
- * the books covers it. Reported rather than discarded: the existing receipt is
- * usually sitting later than it needs to, which is a reschedule, not a non-event.
- */
-export interface SupersededRequirement {
-  itemId: string;
-  plantId: string;
-  /** Bucket the requirement arose in. */
-  day: number;
-  /** Bucket where existing supply restores the balance. */
-  coveredByDay: number;
-  netRequirement: number;
-  /** Release date the order would have had — negative means it was already impossible. */
-  wouldBeReleaseDay: number;
-}
-
 export interface NettingResult {
   orders: PlannedOrderDraft[];
-  superseded: SupersededRequirement[];
   /** Day of the first balance below zero, or −1. */
   firstStockoutDay: number;
   /** Day of the first balance below the planning threshold, or −1. */
@@ -113,12 +92,15 @@ export interface NettingResult {
   /**
    * The net requirement raised in each bucket, before any lot sizing.
    *
-   * This is what the scheduling engine consumes. Quantity and delivery split
-   * are one decision, not two: with a minimum order quantity, a shipment cap, a
-   * storage ceiling and a receiving rate all in play, sizing the order here and
-   * slicing it later produces splits that satisfy one constraint by violating
-   * another. Netting says how short the position runs and when; scheduling
-   * decides what to do about it.
+   * `(gross requirement + safety stock) − (previous balance + scheduled
+   * receipts)`, and the answer to "why is the system asking me to order this?".
+   * Incremental, not cumulative: a gap that persists across nine days is
+   * reported once, so summing the series over a weekly bucket gives the week's
+   * requirement rather than nine times it.
+   *
+   * Published on the plan rather than re-derived from the orders it produced.
+   * Reconstructing it from order explanations loses every requirement lot
+   * sizing consolidated and double-counts every one it split.
    */
   netRequirements: Float64Array;
   /** First bucket the position runs below its norm, or −1. Where line 1 is needed. */
@@ -152,7 +134,12 @@ export function netItemPlant(input: NettingInput): NettingResult {
   const thresholdAt = (day: number): number => (normByBucket ? (normByBucket[day] ?? flatThreshold) : flatThreshold);
   const planningActive = isPlanningActive(itemPlant);
 
-  const totalOffset = input.effectiveLeadTimeDays + itemPlant.grProcessingTimeDays + itemPlant.safetyTimeDays;
+  // `effectiveLeadTimeDays` is the *complete* chain — release to available —
+  // and goods receipt and quality release are already inside it. Adding goods
+  // receipt again here is how the netting offset and the lead-time fence came
+  // to disagree by two days on a material whose whole story is that the fence
+  // sits ten weeks right of the breach.
+  const totalOffset = input.effectiveLeadTimeDays + itemPlant.safetyTimeDays;
   const rule = effectiveLotSizeRule(itemPlant);
 
   /**
@@ -175,10 +162,14 @@ export function netItemPlant(input: NettingInput): NettingResult {
       : calendar.subtractWorkingDays(receiptEpochDay, totalOffset);
 
   const orders: PlannedOrderDraft[] = [];
-  const superseded: SupersededRequirement[] = [];
   let firstStockoutDay = -1;
   let firstBreachDay = -1;
   const netRequirements = new Float64Array(horizonDays + 1);
+  // The shortfall already reported in the run of buckets currently below the
+  // threshold. Without it, a gap that persists for nine days is written out
+  // nine times and a weekly bucket reports seven times the requirement — the
+  // series has to be summable, because the grid sums it.
+  let reportedShortfall = 0;
   let balance = openingStock;
   // The same walk, minus any receipt whose release date has already passed.
   let feasibleBalance = openingStock;
@@ -196,38 +187,28 @@ export function netItemPlant(input: NettingInput): NettingResult {
     const threshold = thresholdAt(day);
     if (firstBreachDay === -1 && balance < threshold - EPSILON) firstBreachDay = day;
 
-    if (balance < threshold - EPSILON) netRequirements[day] = threshold - balance;
+    if (balance < threshold - EPSILON) {
+      // Only the growth in the gap, so the series sums across a bucket. Where
+      // an order is raised the balance is topped back up and the next day's
+      // growth is naturally zero; where one cannot be, this is what stops the
+      // same shortfall being counted every day until supply arrives.
+      const required = threshold - balance;
+      netRequirements[day] = Math.max(0, required - reportedShortfall);
+      reportedShortfall = Math.max(reportedShortfall, required);
+    } else {
+      reportedShortfall = 0;
+    }
 
     if (planningActive && balance < threshold - EPSILON && orders.length < MAX_ORDERS_PER_ITEM_PLANT) {
       const netRequirement = threshold - balance;
 
-      // Before ordering, look at what is already on the books. A receipt that
-      // restores the buffer within the reschedule window makes a new order
-      // redundant — raising one anyway is how planners end up cancelling their
-      // own requisitions a week later. The requirement is still reported, since
-      // the existing receipt is usually later than it ought to be.
-      const coveredByDay = findCoveringReceipt(
-        day,
-        balance,
-        threshold,
-        scheduledReceipts,
-        grossRequirements,
-        horizonDays
-      );
-      if (coveredByDay !== null) {
-        superseded.push({
-          itemId: itemPlant.itemId,
-          plantId: itemPlant.plantId,
-          day,
-          coveredByDay,
-          netRequirement,
-          wouldBeReleaseDay: releaseDayFor(planningEpochDay + day) - planningEpochDay,
-        });
-        projectedAvailable[day] = balance;
-        projectedAvailableFeasible[day] = feasibleBalance;
-        if (firstStockoutDay === -1 && feasibleBalance < -1e-6) firstStockoutDay = day;
-        continue;
-      }
+      // Netting does not look ahead. A receipt landing after this bucket —
+      // acknowledged or not — cannot mean the bucket never needed anything;
+      // it means an existing order is later than the position requires, which
+      // is a pull-in, and the exception engine raises it as one. Deciding here
+      // that a later delivery cancels an earlier requirement is how the whole
+      // worked example lost its headline order: W39 needed 120 MT, and a line
+      // in W41 that nobody had confirmed made the requirement disappear.
 
       const sizing = applyLotSizing({
         rule,
@@ -290,37 +271,12 @@ export function netItemPlant(input: NettingInput): NettingResult {
 
   return {
     orders,
-    superseded,
     firstStockoutDay,
     firstBreachDay,
     threshold: thresholdAt(0),
     netRequirements,
     firstUncoveredDay: firstBreachDay,
   };
-}
-
-/**
- * The bucket at which receipts already on the books restore the balance to the
- * planning threshold, or null when they never do without it first going
- * negative. Bounded by the reschedule window — supply further out than that is
- * not covering this requirement in any useful sense.
- */
-function findCoveringReceipt(
-  fromDay: number,
-  startingBalance: number,
-  threshold: number,
-  scheduledReceipts: Float64Array,
-  grossRequirements: Float64Array,
-  horizonDays: number
-): number | null {
-  const limit = Math.min(fromDay + COVERAGE_LOOKAHEAD_DAYS, horizonDays);
-  let balance = startingBalance;
-  for (let day = fromDay + 1; day <= limit; day += 1) {
-    balance += (scheduledReceipts[day] as number) - (grossRequirements[day] as number);
-    if (balance < -EPSILON) return null;
-    if (balance >= threshold - EPSILON) return day;
-  }
-  return null;
 }
 
 /**

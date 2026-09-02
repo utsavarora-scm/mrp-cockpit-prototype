@@ -16,8 +16,11 @@
 import { formatCurrency, formatNumber, formatPercent } from '@repo/domain';
 import { Skeleton } from '@repo/ui/components/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@repo/ui/components/tabs';
+
+import { CaptureDialog } from '@/components/adherence/CaptureDialog';
 import { cn } from '@repo/ui/lib/utils';
 import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
 import Link from 'next/link';
 
 import type { AdherenceView, Distribution, IntervalSlip } from '@/lib/api-types';
@@ -25,6 +28,7 @@ import { useViewState } from '@/lib/view-state';
 
 export default function AdherencePage() {
   const { plantId } = useViewState();
+  const [capturing, setCapturing] = useState<AdherenceView['lines'][number] | null>(null);
 
   const query = useQuery({
     queryKey: ['adherence', plantId],
@@ -73,7 +77,7 @@ export default function AdherencePage() {
           <ByVendor view={view} />
         </TabsContent>
         <TabsContent value='line' className='mt-4'>
-          <ByLine view={view} />
+          <ByLine view={view} onCapture={setCapturing} />
         </TabsContent>
       </Tabs>
 
@@ -110,6 +114,25 @@ export default function AdherencePage() {
           </p>
         </div>
       </section>
+
+      {capturing ? (
+        <CaptureDialog
+          target={{
+            itemId: capturing.itemId,
+            plantId: capturing.plantId,
+            orderId: capturing.poId,
+            line: capturing.line,
+            baseUom: capturing.baseUom,
+            requestedDate: capturing.requestedDate,
+            confirmedDate: capturing.committedDate,
+            grnDate: capturing.grnDate,
+            grnQty: capturing.receivedQty,
+            qaReleasedOn: capturing.qaReleasedOn,
+            reasonCode: capturing.reasonCode,
+          }}
+          onClose={() => setCapturing(null)}
+        />
+      ) : null}
     </Shell>
   );
 }
@@ -119,6 +142,11 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 function ByMaterial({ view }: { view: AdherenceView }) {
+  // The decomposition follows the row you are looking at. Pinned to the first
+  // one it silently described a different material from the one being read.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = view.byMaterial.find((row) => `${row.itemId}@${row.plantId}` === selectedId) ?? view.byMaterial[0];
+
   return (
     <div className='bg-card rounded-lg border'>
       <div className='border-b px-5 py-3'>
@@ -145,7 +173,11 @@ function ByMaterial({ view }: { view: AdherenceView }) {
           </thead>
           <tbody>
             {view.byMaterial.slice(0, 40).map((row) => (
-              <tr key={`${row.itemId}-${row.plantId}`} className='grid-row hover:bg-muted/30'>
+              <tr
+                key={`${row.itemId}-${row.plantId}`}
+                onClick={() => setSelectedId(`${row.itemId}@${row.plantId}`)}
+                className={cn('grid-row hover:bg-muted/30 cursor-pointer', selected === row && 'bg-primary/[0.06]')}
+              >
                 <td className='grid-cell'>
                   <Link
                     href={`/material/${encodeURIComponent(row.itemId)}/${encodeURIComponent(row.plantId)}`}
@@ -177,7 +209,7 @@ function ByMaterial({ view }: { view: AdherenceView }) {
         </table>
       </div>
 
-      {view.byMaterial[0] ? <IntervalPanel row={view.byMaterial[0]} /> : null}
+      {selected ? <IntervalPanel row={selected} /> : null}
     </div>
   );
 }
@@ -305,7 +337,13 @@ function ByVendor({ view }: { view: AdherenceView }) {
   );
 }
 
-function ByLine({ view }: { view: AdherenceView }) {
+function ByLine({
+  view,
+  onCapture,
+}: {
+  view: AdherenceView;
+  onCapture: (row: AdherenceView['lines'][number]) => void;
+}) {
   return (
     <div className='bg-card rounded-lg border'>
       <div className='border-b px-5 py-3'>
@@ -327,6 +365,7 @@ function ByLine({ view }: { view: AdherenceView }) {
               <Th>Quality released</Th>
               <Th align='right'>Deviation</Th>
               <Th>Reason</Th>
+              <Th />
             </tr>
           </thead>
           <tbody>
@@ -357,15 +396,24 @@ function ByLine({ view }: { view: AdherenceView }) {
                   {row.deviationDays === null ? '—' : `${row.deviationDays > 0 ? '+' : ''}${row.deviationDays} d`}
                 </td>
                 <td className='text-muted-foreground grid-cell text-[11px]'>{row.reasonLabel ?? '—'}</td>
+                <td className='grid-cell text-right'>
+                  <button
+                    type='button'
+                    onClick={() => onCapture(row)}
+                    className='text-primary text-[12px] font-medium hover:underline'
+                  >
+                    {row.grnDate ? 'Update' : 'Record'}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
       <p className='text-muted-foreground border-t px-5 py-3 text-[12px] leading-relaxed'>
-        Vendor committed date and dispatch date do not exist in a system today. At the start the planner records them —
-        a field on the line, filled in after the call they were already making. That is enough to build the dataset, and
-        it costs them nothing they were not already doing.
+        Vendor committed date and dispatch date do not exist in a system today, so the planner records them — after the
+        call they were already making. Recorded permanently: the log survives a restart, and a receipt recorded twice
+        stays one receipt. That is enough to build the dataset, and it costs nothing nobody was already doing.
       </p>
     </div>
   );

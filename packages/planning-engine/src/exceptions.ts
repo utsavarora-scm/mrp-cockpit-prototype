@@ -130,6 +130,17 @@ export interface MaterialContext {
   categorySiblings: CategorySibling[];
   /** Components sharing a parent with this one — the horizontal check. */
   horizontalSiblings: HorizontalSibling[];
+  /**
+   * Whether a made material has a bill of material at all.
+   *
+   * A missing BOM is the master-data gap with the largest consequence — the
+   * requirement below it is simply absent, so the plan is not wrong about the
+   * component, it has never heard of it — and it was the one gap the check did
+   * not look for.
+   */
+  hasBom: boolean;
+  /** Batch expiry on hand, for the excess check that is about expiry rather than cover. */
+  expiringBatches: Array<{ batchId: string; qty: number; expiryDate: string; daysToExpiry: number }>;
 }
 
 export interface OpenLineContext {
@@ -166,11 +177,20 @@ export interface HorizontalSibling {
 /** |measured − maintained| ÷ maintained above this reads as drift worth acting on. */
 export const LEAD_TIME_DRIFT_THRESHOLD = 0.2;
 
-/** Cover above this multiple of the maximum norm reads as excess. */
-const EXCESS_MULTIPLE = 1.1;
+/**
+ * Cover above this multiple of the maximum norm reads as excess.
+ *
+ * Exported because the planning position counts the same condition, and two
+ * copies of one threshold is how a tile and a queue come to disagree about the
+ * same material.
+ */
+export const EXCESS_MULTIPLE = 1.1;
 
 /** A receipt this far past its date with no goods receipt is a live problem. */
 const PAST_DUE_GRACE_DAYS = 2;
+
+/** Cover above this multiple of the norm, when a delivery lands, is worth deferring. */
+const PUSH_OUT_MULTIPLE = 1.5;
 
 // ---------------------------------------------------------------------------
 
@@ -308,10 +328,12 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
 
   // ---- Alternate source reaches it ----------------------------------------
   if (biteDay !== -1 && !reachable) {
+    // It has to reach the exposure, not merely beat this material's own chain.
+    // The second disjunct admitted a sibling five days faster that still landed
+    // after the bite date — and then told the planner, under a heading reading
+    // "fix by switching source", that it reached something it did not.
     const reachableSibling = context.categorySiblings
-      .filter(
-        (sibling) => sibling.earliestReceiptDay <= biteDay || sibling.earliestReceiptDay < fence.earliestReceiptDay
-      )
+      .filter((sibling) => sibling.earliestReceiptDay <= biteDay)
       .sort((a, b) => a.earliestReceiptDay - b.earliestReceiptDay)[0];
 
     if (reachableSibling) {
@@ -346,6 +368,14 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
   // The rosy picture, made structural: if removing the unacknowledged lines
   // moves the first breach earlier, the plan survives on a line nobody has
   // agreed to.
+  //
+  // Tier **2**, deliberately. The requirements document contradicts itself
+  // here: its exception table calls this "a breach avoided only by a Tier-3
+  // receipt", while §6.4 states the two rules the tiers exist for — a breach
+  // avoided only by Tier 3 *is still a breach* and is raised as one, and a
+  // breach avoided only by Tier 2 is raised as supply unconfirmed. §6.4 wins,
+  // because it is the section that defines the tiers and the table is a
+  // summary of it. Tier 3 is handled by the breach exception above.
   let confirmedBreachDay = -1;
   for (let day = 0; day <= horizonDays; day += 1) {
     if ((plan.projectedConfirmedOnly[day] as number) < safetyStock) {
@@ -439,6 +469,64 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
     }
   }
 
+  // The mirror of the pull-in, and the half that was never written. The excess
+  // exception has been telling planners to "push out the next inbound line"
+  // for as long as it has existed without anything naming which line that is.
+  //
+  // Two conditions, both about a delivery arriving into a position that does
+  // not want it: cover already beyond the maximum norm when it lands, or a
+  // quantity that will not fit on the floor.
+  {
+    const norm = context.maxNormDays;
+    const cap = itemPlant.storageCapacity;
+
+    const unwanted = context.openLines
+      .filter((line) => line.tier <= 2 && line.expectedDay >= 0 && line.expectedDay <= horizonDays && !line.hasGrn)
+      .map((line) => {
+        const cover = plan.daysOfCover[line.expectedDay] as number;
+        const onHand = plan.projectedBeforePlanned[line.expectedDay] as number;
+        // A wider band than the excess check uses. A delivery landing into cover
+        // a little above the norm is a replenishment pipeline working; one
+        // landing into half again as much is a delivery nobody wants. At the
+        // narrower threshold this fired on a quarter of the book and stopped
+        // being a finding.
+        const overNorm = norm !== null && cover > norm * PUSH_OUT_MULTIPLE;
+        const overCap = cap !== null && cap > 0 && onHand > cap;
+        return { line, cover, onHand, overNorm, overCap };
+      })
+      .filter((row) => row.overNorm || row.overCap)
+      .sort((a, b) => a.line.expectedDay - b.line.expectedDay)[0];
+
+    if (unwanted) {
+      const { line, cover, onHand, overCap } = unwanted;
+      emit({
+        code: 'PUSH_OUT',
+        group: 'MOVE_EXISTING_ORDER',
+        severity: 'LOW',
+        headline: overCap
+          ? `${round(line.qty)} ${context.baseUom} on ${line.orderId} line ${line.line} lands on a position of ${round(onHand)} against ${round(cap as number)} of space.`
+          : `${round(line.qty)} ${context.baseUom} on ${line.orderId} line ${line.line} lands into ${Math.round(cover)} days of cover against a ${norm}-day maximum norm.`,
+        biteDay: line.expectedDay,
+        qtyAtStake: line.qty,
+        daysAtStake: overCap ? 0 : cover - (norm ?? 0),
+        reachableByOrdering: true,
+        operands: overCap
+          ? [
+              { label: 'Position when it lands', value: onHand, source: 'Balance before planned orders' },
+              { label: 'Storage capacity', value: cap as number, source: 'Plant master' },
+            ]
+          : [
+              { label: 'Days of cover when it lands', value: cover, source: 'Balance against forward consumption' },
+              { label: 'Maximum norm, days', value: norm as number, source: 'Material master' },
+            ],
+        actions: [
+          `Ask ${line.vendorName ?? line.vendorId ?? 'the vendor'} to defer ${line.orderId} line ${line.line}.`,
+          'Or take the delivery and carry the cover deliberately, with the cost stated.',
+        ],
+      });
+    }
+  }
+
   // ---- Excess and obsolescence --------------------------------------------
   const closingCover = plan.daysOfCover[0] as number;
   if (context.maxNormDays !== null && closingCover > context.maxNormDays * EXCESS_MULTIPLE) {
@@ -458,13 +546,18 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
       ],
       actions: ['Push out or cancel the next inbound line.', 'Redeploy to another plant if the network allows it.'],
     });
-  } else if (context.shelfLifeDays !== null && closingCover > context.shelfLifeDays * 0.75) {
+  }
+
+  // Cover beyond the norm and cover beyond the shelf life are two findings with
+  // two owners, and an `else if` reported only the first — at the *lower* of
+  // the two severities, because the norm branch is tested first.
+  if (context.shelfLifeDays !== null && closingCover > context.shelfLifeDays * 0.75) {
     emit({
       code: 'EXCESS_RISK',
       group: 'REDUCE_COVER',
       severity: 'MEDIUM',
       headline: `${context.description} holds ${Math.round(closingCover)} days of cover against a ${context.shelfLifeDays}-day shelf life.`,
-      biteDay: 0,
+      biteDay: 1,
       qtyAtStake: plan.openingStock * 0.25,
       daysAtStake: closingCover,
       reachableByOrdering: true,
@@ -473,6 +566,32 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
         { label: 'Shelf life, days', value: context.shelfLifeDays, source: 'Material master' },
       ],
       actions: ['Push out the next inbound line before it writes off.'],
+    });
+  }
+
+  // Expiry proper, which is not the same question as cover. A batch dated to
+  // die is a write-off whatever the forward cover says, and the data has been
+  // in the snapshot all along with nothing reading it.
+  const expiring = context.expiringBatches.filter(
+    (batch) => batch.daysToExpiry <= (context.shelfLifeDays ?? 90) * 0.25
+  );
+  if (expiring.length > 0) {
+    const qty = expiring.reduce((sum, batch) => sum + batch.qty, 0);
+    const soonest = expiring.reduce((min, batch) => Math.min(min, batch.daysToExpiry), Number.POSITIVE_INFINITY);
+    emit({
+      code: 'EXCESS_RISK',
+      group: 'REDUCE_COVER',
+      severity: soonest <= 30 ? 'HIGH' : 'MEDIUM',
+      headline: `${round(qty)} ${context.baseUom} of ${context.description} expires within ${Math.round(soonest)} days, across ${expiring.length} batch${expiring.length === 1 ? '' : 'es'}.`,
+      biteDay: Math.max(0, Math.round(soonest)),
+      qtyAtStake: qty,
+      daysAtStake: soonest,
+      reachableByOrdering: false,
+      operands: [
+        { label: 'Quantity expiring', value: qty, source: 'Batch expiry dates on hand' },
+        { label: 'Days to the first expiry', value: soonest, source: 'Earliest batch' },
+      ],
+      actions: ['Consume or redeploy the oldest batches first.', 'Push out the next inbound line before it compounds.'],
     });
   }
 
@@ -534,6 +653,10 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
   if (itemPlant.safetyStock === null) gaps.push('safety stock');
   if (itemPlant.lotSizeRule === null) gaps.push('lot-sizing rule');
   if (itemPlant.procurementType === 'BUY' && context.vendor === null) gaps.push('approved source');
+  // The gap with the largest consequence, and the one nothing looked for: a
+  // made material with no bill of material raises no requirement at all, so the
+  // plan is not wrong about what sits below it — it has never heard of it.
+  if (itemPlant.procurementType === 'MAKE' && !context.hasBom) gaps.push('bill of material');
   if (gaps.length > 0) {
     emit({
       code: 'MASTER_DATA_GAP',

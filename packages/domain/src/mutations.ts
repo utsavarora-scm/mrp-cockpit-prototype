@@ -23,6 +23,10 @@ export type SnapshotMutation =
         | 'reorderPoint'
         | 'safetyTimeDays'
         | 'grProcessingTimeDays'
+        // Quality inspection is a planning parameter like any other, and the
+        // simulate dialog has offered it for as long as it has existed — forced
+        // through a cast because this union had never been told.
+        | 'qaQuarantineDays'
         | 'scrapPct'
         | 'serviceLevelTarget';
       value: number | null;

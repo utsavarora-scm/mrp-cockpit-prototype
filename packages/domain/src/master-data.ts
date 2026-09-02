@@ -67,9 +67,25 @@ export interface ItemPlant {
   periodsOfSupplyDays: number | null;
   /** VB. */
   reorderPoint: number | null;
-  /** Planned delivery time (BUY) or in-house production time (MAKE). */
+  /**
+   * The complete planning lead time: purchase-order release to available for
+   * consumption, in calendar days. **Not** the vendor's quoted number.
+   *
+   * It is the sum of all six intervals — vendor response, vendor readiness,
+   * transit, customs, goods receipt and quality release — so `leadTimeChain`
+   * decomposes it and netting offsets by it, and the two cannot disagree. Most
+   * systems store the manufacturing time here and omit the rest, which is a
+   * large, systematic understatement and the reason plans that look fine on
+   * paper break at the dock.
+   *
+   * It belongs to the **primary planning source** — the vendor MRP nets on. An
+   * alternate vendor on the same material has its own chain, summed from that
+   * vendor's own record; see `alternateLeadTimeChain`.
+   *
+   * For MAKE items it is in-house production time, walked in working days.
+   */
   leadTimeDays: number | null;
-  /** Goods receipt processing time — gate-in to put-away. */
+  /** Goods receipt processing time — gate-in to put-away. Inside `leadTimeDays`. */
   grProcessingTimeDays: number;
   /**
    * Days a receipt sits in quality inspection before it counts as stock.
@@ -78,6 +94,9 @@ export interface ItemPlant {
    * so a plan that counts it is optimistic by exactly this many days — and when
    * a batch fails and moves to blocked, the quantity leaves the balance at once
    * and every downstream bucket goes negative together.
+   *
+   * Inside `leadTimeDays`, like `grProcessingTimeDays`. Held separately because
+   * the interval has its own owner and its own measured slip.
    */
   qaQuarantineDays: number;
   safetyStock: number | null;
@@ -92,6 +111,15 @@ export interface ItemPlant {
   isPlanningRelevant: boolean;
   /** ISO date the planning parameters were last maintained. Drives freshness scoring. */
   paramsLastChangedOn: string;
+  /**
+   * Who last maintained them.
+   *
+   * Provenance is a person as well as a date. "Safety stock, set March 2024"
+   * invites the question the planner actually has — *by whom, and are they
+   * still here* — and a trust layer that cannot answer it has stopped one
+   * question short.
+   */
+  paramsLastChangedBy: string;
 
   /**
    * How much of this material the plant can physically hold, in base UoM.

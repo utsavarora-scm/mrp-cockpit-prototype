@@ -23,7 +23,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@repo/ui/components/too
 import { cn } from '@repo/ui/lib/utils';
 import { useMemo, useState } from 'react';
 
-import type { ChartBucket, GridRow, MaterialDetail } from '@/lib/api-types';
+import type { ChartBucket, GridCell, GridRow, MaterialDetail } from '@/lib/api-types';
 
 const STATUS_WORD: Record<ChartBucket['status'], string> = {
   OK: 'OK',
@@ -33,7 +33,23 @@ const STATUS_WORD: Record<ChartBucket['status'], string> = {
   EXCESS: 'Excess',
 };
 
-export function PlanningGrid({ detail, onExplain }: { detail: MaterialDetail; onExplain?: () => void }) {
+export interface GridAnchor {
+  row: string;
+  /** The days the cell covers — a date, not an index, because the weekly
+   * collapse renumbers buckets and an index would explain the wrong one. */
+  fromDate: string;
+  toDate: string;
+  label: string;
+}
+
+export function PlanningGrid({
+  detail,
+  onExplain,
+}: {
+  detail: MaterialDetail;
+  /** Opened from a cell, and told which one. */
+  onExplain?: (anchor?: GridAnchor) => void;
+}) {
   // The near horizon is bucketed daily, which is right for a dock-level
   // decision and far too wide for reading a plan across. Collapsing rolls the
   // daily buckets up into the weeks they belong to — and it *rolls them up*
@@ -65,7 +81,7 @@ export function PlanningGrid({ detail, onExplain }: { detail: MaterialDetail; on
           {onExplain ? (
             <button
               type='button'
-              onClick={onExplain}
+              onClick={() => onExplain()}
               className='bg-primary text-primary-foreground h-7 rounded-md px-2.5 text-[12px] font-medium'
             >
               Explain this
@@ -97,7 +113,7 @@ export function PlanningGrid({ detail, onExplain }: { detail: MaterialDetail; on
           </thead>
           <tbody>
             {visible.rows.map((row) => (
-              <Row key={row.key} row={row} buckets={visible.buckets} uom={detail.baseUom} />
+              <Row key={row.key} row={row} buckets={visible.buckets} uom={detail.baseUom} onExplain={onExplain} />
             ))}
             <StatusRow buckets={visible.buckets} />
           </tbody>
@@ -105,15 +121,26 @@ export function PlanningGrid({ detail, onExplain }: { detail: MaterialDetail; on
       </div>
 
       <p className='text-muted-foreground border-t px-5 py-3 text-[12px] leading-relaxed'>
-        Read the two balance rows together. The first is where inventory is heading on what exists; the second is where
-        it would head if everything the plan proposes were actually done — and only counting orders that can still be
-        placed. Showing only the second is how a planning screen hides a problem behind its own answer.
+        Read the two balance rows together. The first is where inventory is heading on stock and existing orders alone.
+        The second is where it would head if every order the plan proposes were actually placed — including the ones
+        whose release week has already passed, which is why the release row above it matters. Showing only the second is
+        how a planning screen hides a problem behind its own answer.
       </p>
     </section>
   );
 }
 
-function Row({ row, buckets, uom }: { row: GridRow; buckets: ChartBucket[]; uom: string }) {
+function Row({
+  row,
+  buckets,
+  uom,
+  onExplain,
+}: {
+  row: GridRow;
+  buckets: ChartBucket[];
+  uom: string;
+  onExplain?: (anchor?: GridAnchor) => void;
+}) {
   const emphasised = row.emphasis !== 'NONE';
 
   return (
@@ -149,45 +176,102 @@ function Row({ row, buckets, uom }: { row: GridRow; buckets: ChartBucket[]; uom:
 
       {buckets.map((bucket, position) => {
         const value = row.values[position] ?? 0;
-        const bad =
-          (row.tone === 'NEGATIVE_IS_BAD' && value < 0) ||
-          (row.tone === 'NEGATIVE_IS_BAD' && row.key === 'balanceBefore' && value < bucket.safetyStock);
-        // A release quantity landing in the first bucket is a release date that
-        // has already passed — the finding, not a rounding artefact.
-        const pastRelease = row.tone === 'PAST_IS_BAD' && position === 0 && value > 0;
+        // A balance below safety stock is a breach on either balance row, not
+        // only on the honest one — the row that shows the plan's own answer has
+        // to admit when the answer still leaves the buffer broken.
+        const isBalance = row.tone === 'NEGATIVE_IS_BAD';
+        const bad = isBalance && (value < 0 || value < bucket.safetyStock);
+        const annotations = row.cells?.[position] ?? [];
+
+        // Every cell opens its own explanation. The claim was in this file's
+        // docstring for a long time before any `<td>` could act on it.
+        const explainThis = onExplain
+          ? () =>
+              onExplain({
+                row: row.key,
+                fromDate: bucket.startDate,
+                toDate: bucket.endDate,
+                label: `${row.label}, ${bucket.kind === 'DAY' ? bucket.label : bucket.week}`,
+              })
+          : undefined;
+
+        if (row.cells) {
+          return (
+            <td
+              key={bucket.index}
+              className={cn(
+                'grid-cell num whitespace-nowrap',
+                bucket.startsZone && position > 0 && 'border-border border-l',
+                annotations.length === 0 && 'text-muted-foreground/45',
+              )}
+            >
+              {annotations.length === 0 ? '—' : <ReleaseCells cells={annotations} uom={uom} />}
+            </td>
+          );
+        }
 
         return (
           <td
             key={bucket.index}
             className={cn(
-              'grid-cell num whitespace-nowrap',
+              'grid-cell num whitespace-nowrap p-0',
               bucket.startsZone && position > 0 && 'border-border border-l',
-              emphasised && 'font-medium',
-              bad && 'text-status-critical',
-              pastRelease && 'text-status-critical font-semibold',
-              value === 0 && 'text-muted-foreground/45',
             )}
           >
-            {pastRelease ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className='cursor-help'>{formatNumber(value)} ⚠</span>
-                </TooltipTrigger>
-                <TooltipContent className='max-w-[280px]'>
-                  This order needed releasing before today. It cannot now be placed in time — shown here rather than
-                  dropped off the left of the chart, because the fact that it is late is the point.
-                </TooltipContent>
-              </Tooltip>
-            ) : value === 0 ? (
-              '—'
-            ) : (
-              formatNumber(value)
-            )}
+            <button
+              type='button'
+              onClick={explainThis}
+              aria-label={`Explain ${row.label} in ${bucket.week}`}
+              className={cn(
+                'hover:bg-primary/[0.07] focus-visible:ring-ring block h-full w-full px-2 py-1 text-right tabular-nums focus-visible:ring-2 focus-visible:outline-none',
+                emphasised && 'font-medium',
+                bad && 'text-status-critical',
+                value === 0 && 'text-muted-foreground/45',
+              )}
+            >
+              {value === 0 ? '—' : formatNumber(value)}
+            </button>
           </td>
         );
       })}
       <td className='sr-only'>{uom}</td>
     </tr>
+  );
+}
+
+/**
+ * The week an order had to be released, under the week it is needed.
+ *
+ * More than one can share a bucket: a requirement above the maximum lot is cut
+ * into several orders, and each has its own release date. They are listed
+ * rather than merged, because "two parcels, both already late" is a different
+ * sentence from "one parcel, already late".
+ */
+function ReleaseCells({ cells, uom }: { cells: GridCell[]; uom: string }) {
+  return (
+    <span className='inline-flex flex-col items-end gap-0.5'>
+      {cells.map((cell, index) => (
+        <Tooltip key={`${cell.releaseDate}-${index}`}>
+          <TooltipTrigger asChild>
+            <span
+              className={cn(
+                'cursor-help whitespace-nowrap',
+                cell.tone === 'PAST' ? 'text-status-critical font-semibold' : 'text-foreground',
+              )}
+            >
+              {cell.text}
+              {cell.tone === 'PAST' ? ' ⚠' : ''}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className='max-w-[300px]'>
+            {formatNumber(cell.qty)} {uom} has to be released on {cell.releaseDate} to land in this bucket.{' '}
+            {cell.tone === 'PAST'
+              ? `That date passed ${cell.weeksLate} ${cell.weeksLate === 1 ? 'week' : 'weeks'} ago, so this order cannot be placed in time. It is shown rather than dropped, because the fact that it is late is the point.`
+              : 'That date is still ahead, so this one can still be placed.'}
+          </TooltipContent>
+        </Tooltip>
+      ))}
+    </span>
   );
 }
 
@@ -274,6 +358,10 @@ function collapseToWeeks(detail: MaterialDetail): { buckets: ChartBucket[]; rows
         ? indexes.reduce((sum, index) => sum + (row.values[index] ?? 0), 0)
         : (row.values[indexes[indexes.length - 1] as number] ?? 0),
     ),
+    // Annotations concatenate — a week holds every release date its days held.
+    // Dropping them here is how the "W26, ten weeks ago" beat would vanish the
+    // moment the grid was switched to weeks, which is how it is usually read.
+    ...(row.cells ? { cells: groups.map((indexes) => indexes.flatMap((index) => row.cells?.[index] ?? [])) } : {}),
   }));
 
   return { buckets, rows };

@@ -24,10 +24,18 @@ import {
   type ConstraintKey,
 } from '@repo/planning-engine';
 
-import type { ConstraintView, ScheduleBuilderView, ScheduleLineView } from '../api-types';
+import type {
+  ConstraintView,
+  ProposedCorrectionView,
+  ScheduleAdvisoryView,
+  ScheduleBuilderView,
+  ScheduleLineView,
+  ScheduleViolationView,
+} from '../api-types';
 import { runContext, type MaterialFacts, type RunContext } from './context';
 import { runHeader } from './header';
 import { buildOrders } from './material';
+import { builderEditsFor } from './planning-session';
 
 /** Shortest and longest window worth building a delivery schedule over. */
 const MIN_WINDOW_DAYS = 28;
@@ -62,7 +70,10 @@ export function scheduleBuilder(
   const shutdownWeeks =
     context.snapshot.vendors.find((row) => row.id === facts.vendor?.vendorId)?.productionShutdownWeeks ?? [];
 
+  const plannerLines = builderEditsFor(itemId, plantId).map((edit) => ({ line: edit.line, qty: edit.qty }));
+
   const result = buildDeliverySchedule({
+    plannerLines,
     itemId,
     plantId,
     vendorId: facts.vendor?.vendorId ?? null,
@@ -79,6 +90,17 @@ export function scheduleBuilder(
     weeklyCapacity: facts.vendor?.weeklyCapacity ?? null,
     storageCapacity: facts.itemPlant.storageCapacity,
     minGapDays: facts.vendor?.minGapDays ?? 0,
+    dailyReceivingCapacity: facts.itemPlant.dailyReceivingCapacity,
+    shelfLifeDays: facts.shelfLifeDays,
+    qaQuarantineDays: facts.itemPlant.qaQuarantineDays,
+    // The sourcing split, on the delivery rather than buried in master data.
+    sourceSplit: facts.vendors
+      .filter((vendor) => vendor.allocationShare > 0)
+      .map((vendor) => ({
+        vendorId: vendor.vendorId,
+        vendorName: context.snapshot.vendors.find((row) => row.id === vendor.vendorId)?.name ?? null,
+        share: vendor.allocationShare,
+      })),
     transitDays: (facts.vendor?.transitDays ?? 0) + (facts.vendor?.customsDays ?? 0),
     earliestReceiptDay: facts.fences.maintained.earliestReceiptDay,
     productionShutdownWeeks: shutdownWeeks,
@@ -153,6 +175,34 @@ export function scheduleBuilder(
             recoveredIn: result.residual.recoveredIn,
             stocksOut: result.residual.stocksOut,
           },
+    blockingViolations: result.blockingViolations.map(
+      (row): ScheduleViolationView => ({
+        line: row.line,
+        week: row.week,
+        constraint: row.constraint,
+        constraintLabel:
+          row.constraint === 'UNATTRIBUTED'
+            ? 'Unattributed difference'
+            : row.constraint === 'UNPLACEABLE'
+              ? 'Quantity with nowhere to go'
+              : CONSTRAINT_LABEL[row.constraint],
+        qty: round(row.qty),
+        message: row.message,
+      }),
+    ),
+    advisories: result.advisories.map(
+      (row): ScheduleAdvisoryView => ({ line: row.line, week: row.week, kind: row.kind, message: row.message }),
+    ),
+    proposedCorrections: result.proposedCorrections.map(
+      (row): ProposedCorrectionView => ({
+        line: row.line,
+        week: row.week,
+        from: round(row.from),
+        to: round(row.to),
+        reason: row.reason,
+      }),
+    ),
+    plannerLines,
     orders: buildOrders(facts, context),
     fence: {
       totalDays: facts.fences.maintained.totalDays,

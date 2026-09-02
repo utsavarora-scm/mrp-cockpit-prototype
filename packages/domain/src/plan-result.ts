@@ -45,6 +45,17 @@ export interface ItemPlantPlan {
    * is on site and is not stock, and the plan has to be able to say so.
    */
   qaReleases: Float64Array;
+  /**
+   * The shortfall against the planning threshold in each bucket, before any lot
+   * sizing — `(gross requirement + safety stock) − (previous balance +
+   * scheduled receipts)`, and the number the sponsor asked for by name.
+   *
+   * Incremental rather than cumulative, so a bucket's value is that bucket's
+   * requirement and the series can be summed across a week. Carried here rather
+   * than re-derived from the recommendations it produced: reconstruction loses
+   * every requirement lot sizing consolidated and repeats every one it split.
+   */
+  netRequirements: Float64Array;
   plannedReceipts: Float64Array;
   projectedAvailable: Float64Array;
   /**

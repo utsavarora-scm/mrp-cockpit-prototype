@@ -90,6 +90,7 @@ export function itemPlant(overrides: Partial<ItemPlant> & Pick<ItemPlant, 'itemI
     sourcePlantId: null,
     isPlanningRelevant: true,
     paramsLastChangedOn: '2024-01-01',
+    paramsLastChangedBy: 'Test',
     storageCapacity: null,
     dailyReceivingCapacity: null,
     maintainedStockDays: null,

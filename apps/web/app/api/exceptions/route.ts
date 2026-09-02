@@ -23,6 +23,11 @@ export async function GET(request: Request) {
       plant: url.searchParams.get('plant') ?? undefined,
       group: (group as ActionGroup | null) ?? undefined,
       includeDismissed: url.searchParams.get('dismissed') === 'true',
+      // How many of each group to return. The screen wants the top of the
+      // ranking; anything checking the whole book wants all of it.
+      limitPerGroup: Number.isInteger(Number(url.searchParams.get('limit')))
+        ? Number(url.searchParams.get('limit'))
+        : undefined,
     }),
   );
 }

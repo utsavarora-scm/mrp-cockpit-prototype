@@ -17,7 +17,7 @@ import { bucketLevel, computeFences, FALLBACK_CALENDAR, leadTimeChain, WorkingCa
 
 import type { SimulationView } from '../api-types';
 import { runContext } from './context';
-import { planWithParamOverride, type OverridableField } from './planning-session';
+import { planWithChange, type SimulationChange } from './planning-session';
 
 /** Fields a planner may simulate. Derived values are never editable. */
 export const SIMULATABLE_FIELDS: Record<string, string> = {
@@ -31,19 +31,63 @@ export const SIMULATABLE_FIELDS: Record<string, string> = {
   qaQuarantineDays: 'Quality inspection, days',
 };
 
+/** The label a change is shown under, and the value it reads as. */
+function describe(
+  change: SimulationChange,
+  facts: { itemPlant: { lotSizeRule: string | null } },
+): {
+  field: string;
+  label: string;
+  before: number | null;
+  after: number | null;
+  beforeText: string;
+  afterText: string;
+} {
+  if (change.kind === 'LOT_RULE') {
+    return {
+      field: 'lotSizeRule',
+      label: 'Lot-sizing policy',
+      before: null,
+      after: null,
+      beforeText: facts.itemPlant.lotSizeRule ?? 'none',
+      afterText: change.value,
+    };
+  }
+  if (change.kind === 'DEMAND') {
+    return {
+      field: 'demand',
+      label: 'Demand in the window',
+      before: null,
+      after: change.value,
+      beforeText: 'as planned',
+      afterText: String(change.value),
+    };
+  }
+  return {
+    field: change.field,
+    label: SIMULATABLE_FIELDS[change.field] ?? change.field,
+    before: null,
+    after: change.value,
+    beforeText: '',
+    afterText: change.value === null ? 'cleared' : String(change.value),
+  };
+}
+
 export function simulate(
   scenarioId: string,
   itemId: string,
   plantId: string,
-  field: OverridableField,
-  value: number | null,
+  change: SimulationChange,
 ): SimulationView | null {
   const started = performance.now();
   const context = runContext(scenarioId);
   const facts = context.materials.get(planKey(itemId, plantId));
   if (!facts) return null;
 
-  const after = planWithParamOverride(scenarioId, itemId, plantId, field, value);
+  const described = describe(change, facts);
+  const field = described.field;
+
+  const after = planWithChange(scenarioId, itemId, plantId, change);
   if (!after) return null;
 
   const afterPlan = after.plan.plans.get(planKey(itemId, plantId));
@@ -75,9 +119,9 @@ export function simulate(
 
   return {
     field,
-    label: SIMULATABLE_FIELDS[field] ?? field,
+    label: described.label,
     before: readField(facts.itemPlant as unknown as Record<string, unknown>, field),
-    after: value,
+    after: described.after,
     metrics: [
       metric(
         'First safety-stock breach',

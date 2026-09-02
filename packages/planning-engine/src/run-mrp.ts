@@ -30,13 +30,7 @@ import {
 import { buildCalendars, FALLBACK_CALENDAR, WorkingCalendar } from './calendar';
 import { consumeForecast } from './forecast-consumption';
 import { assignLowLevelCodes } from './low-level-codes';
-import {
-  computeDaysOfCover,
-  isPlanningActive,
-  netItemPlant,
-  type PlannedOrderDraft,
-  type SupersededRequirement,
-} from './netting';
+import { computeDaysOfCover, isPlanningActive, netItemPlant, type PlannedOrderDraft } from './netting';
 import { summariseObservedLeadTimes, type ObservedLeadTime } from './observed';
 
 /** Lookups the downstream engines need that are not already on MrpResult. */
@@ -55,7 +49,6 @@ export interface EngineIndex {
   calendars: Map<string, WorkingCalendar>;
   calendarForPlant: Map<string, WorkingCalendar>;
   ordersByKey: Map<string, PlannedOrderDraft[]>;
-  supersededByKey: Map<string, SupersededRequirement[]>;
   planningEpochDay: number;
 }
 
@@ -107,6 +100,7 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
       confirmedReceipts: new Float64Array(buckets),
       committedReceipts: new Float64Array(buckets),
       qaReleases: new Float64Array(buckets),
+      netRequirements: new Float64Array(buckets),
       plannedReceipts: new Float64Array(buckets),
       projectedAvailable: new Float64Array(buckets),
       projectedBeforePlanned: new Float64Array(buckets),
@@ -231,7 +225,6 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
   // ---- Level-by-level netting -------------------------------------------
   const allOrders: PlannedOrderDraft[] = [];
   const ordersByKey = new Map<string, PlannedOrderDraft[]>();
-  const supersededByKey = new Map<string, SupersededRequirement[]>();
   const plannedOrders: SupplyElement[] = [];
   const orderExplanations = new Map<string, PlannedOrderExplanation[]>();
 
@@ -290,7 +283,7 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     });
 
     if (result.orders.length > 0) ordersByKey.set(key, result.orders);
-    if (result.superseded.length > 0) supersededByKey.set(key, result.superseded);
+    plan.netRequirements = result.netRequirements;
 
     // Keep the working, not just the answer. `threshold − netRequirement` is
     // the balance netting was topping up from, which is the figure a planner
@@ -405,7 +398,6 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     calendars,
     calendarForPlant,
     ordersByKey,
-    supersededByKey,
     planningEpochDay,
   };
   void index;

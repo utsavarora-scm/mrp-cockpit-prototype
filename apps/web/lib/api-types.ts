@@ -105,6 +105,14 @@ export interface PositionRow {
   statusLabel: string;
   /** True when no order placed today can reach the exposure. */
   reachableByOrdering: boolean;
+  maxNormDays: number | null;
+  /**
+   * The tiles this row belongs to.
+   *
+   * Computed once and read by both the count and the drill-down, so clicking a
+   * tile shows exactly as many rows as the tile says.
+   */
+  tiles: PositionTile['key'][];
 }
 
 export interface PlanningPosition {
@@ -143,12 +151,39 @@ export interface ChartBucket {
   balanceConfirmedOnly: number;
   /** The plan, if everything proposed is actually done. */
   balanceAfterPlanned: number;
+  /**
+   * The same, less any order whose release date has already passed.
+   *
+   * The honest counterpart: a textbook MRP run always looks solvable, because
+   * it happily plans a receipt for a date it can no longer be ordered for.
+   * Drawn beside `balanceAfterPlanned`, the gap between them is the exposure
+   * no purchase order can reach.
+   */
+  balanceAfterPlaceable: number;
   safetyStock: number;
   maxNorm: number | null;
   daysOfCover: number;
   /** Against the maintained fence. */
   fenceZone: 'FROZEN' | 'FIRM' | 'FREE';
   status: 'OK' | 'TIGHT' | 'BREACH' | 'STOCK_OUT' | 'EXCESS';
+}
+
+/**
+ * One annotation in a grid cell that carries a date rather than a quantity.
+ *
+ * The planned-order release row is the case: under the bucket a receipt is
+ * needed in, it names the week the order had to be placed. A quantity keyed to
+ * the release bucket cannot say "week 39 needed ordering in week 26", which is
+ * the single most useful thing the screen shows.
+ */
+export interface GridCell {
+  text: string;
+  tone: 'NEUTRAL' | 'PAST';
+  releaseWeek: string;
+  releaseDate: string;
+  /** How many weeks the release date has already passed by. Zero when it has not. */
+  weeksLate: number;
+  qty: number;
 }
 
 /** One row of the classic planning grid. Fixed order, every cell explainable. */
@@ -164,6 +199,14 @@ export interface GridRow {
   /** Flags a cell red where the value is a date in the past, not a quantity. */
   tone: 'NEUTRAL' | 'NEGATIVE_IS_BAD' | 'PAST_IS_BAD';
   note: string | null;
+  /**
+   * Per-bucket annotations, where the row is dates rather than numbers.
+   *
+   * One array per bucket, because lot sizing can split a single requirement
+   * across several receipts and each carries its own release date. Present only
+   * on the rows that need it; `values` stays authoritative everywhere else.
+   */
+  cells?: GridCell[][];
 }
 
 /** One interval of the lead-time chain, with the function that owns it. */
@@ -191,6 +234,8 @@ export interface ParameterView {
   /** Source system, field, and when it was last touched. */
   source: string;
   lastChangedOn: string;
+  /** Who last touched it. A date on its own leaves the planner's next question open. */
+  changedBy: string;
   note: string | null;
   /** True where the planner may override it from this screen. */
   editable: boolean;
@@ -299,6 +344,8 @@ export interface ProvenanceRow {
   value: string;
   system: string;
   lastChangedOn: string;
+  /** Who last touched it. A date on its own leaves the planner's next question open. */
+  changedBy: string;
   /** Days since it was last touched. Master data set once is a fact worth seeing. */
   ageDays: number;
 }
@@ -306,6 +353,8 @@ export interface ProvenanceRow {
 export interface ExplainPayload {
   itemId: string;
   plantId: string;
+  /** Which cell this explains, where it was opened from one. */
+  anchor: { row: string | null; label: string; week: string } | null;
   /** One sentence, before any table. Deterministic — the same numbers always
    * produce the same sentence. A generated narrative that cannot be reproduced
    * is the opposite of a trust layer. */
@@ -438,6 +487,68 @@ export interface ScheduleBuilderView {
   /** The inbound timeline — every open order on this material. */
   orders: OrderView[];
   fence: FenceView;
+
+  /**
+   * Why this schedule cannot be sent. Empty means it can.
+   *
+   * Kept apart from `advisories` because the two are answered differently: a
+   * broken ceiling is a mistake to fix, a residual exposure is a finding to
+   * accept. The packaging hero's worked example ends in one of each.
+   */
+  blockingViolations: ScheduleViolationView[];
+  advisories: ScheduleAdvisoryView[];
+  /** What the engine would change elsewhere to fit an edit. Offered, not applied. */
+  proposedCorrections: ProposedCorrectionView[];
+  /** The lines the planner has set by hand, as they stand. */
+  plannerLines: Array<{ line: number; qty: number }>;
+}
+
+export interface ScheduleViolationView {
+  line: number | null;
+  week: string;
+  constraint: string;
+  constraintLabel: string;
+  qty: number;
+  message: string;
+}
+
+export interface ScheduleAdvisoryView {
+  line: number | null;
+  week: string | null;
+  kind: 'RESIDUAL_EXPOSURE' | 'INSIDE_FENCE';
+  message: string;
+}
+
+export interface ProposedCorrectionView {
+  line: number;
+  week: string;
+  from: number;
+  to: number;
+  reason: string;
+}
+
+/** What a prepared schedule would send. Produced, never transmitted. */
+export interface SchedulePayloadView {
+  itemId: string;
+  plantId: string;
+  description: string;
+  baseUom: string;
+  vendorId: string | null;
+  vendorName: string | null;
+  shipFrom: string | null;
+  shipTo: string;
+  preparedBy: string;
+  reasonCode: string | null;
+  note: string;
+  lines: Array<{
+    line: number;
+    qty: number;
+    requestedDeliveryDate: string;
+    dispatchBy: string;
+    changeFromPrevious: string | null;
+  }>;
+  /** Advisories the planner acknowledged in order to prepare this. */
+  acknowledged: ScheduleAdvisoryView[];
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +677,14 @@ export interface ExceptionView {
   daysAtStake: number;
   valueAtStake: number;
   reachableByOrdering: boolean;
+  /**
+   * The engine's own ranking, by consequence rather than by count.
+   *
+   * Computed per exception and then thrown away, because it never reached the
+   * browser: the queue re-sorted on time-to-breach and value, which cannot see
+   * severity or reachability at all.
+   */
+  score: number;
   operands: Array<{ label: string; value: number; source: string }>;
   actions: string[];
   dismissed: boolean;
@@ -580,6 +699,8 @@ export interface ExceptionQueueView {
     count: number;
     valueAtStake: number;
     exceptions: ExceptionView[];
+    /** How many of `count` the list below actually holds. */
+    shown: number;
   }>;
   total: number;
 }

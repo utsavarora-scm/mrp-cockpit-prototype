@@ -18,6 +18,7 @@
  */
 
 import {
+  ACTION_GROUP_LABEL,
   componentFactor,
   bucketFlow,
   bucketLevel,
@@ -47,6 +48,7 @@ import type {
   ExplainPayload,
   ExceptionView,
   FenceView,
+  GridCell,
   GridRow,
   MaterialDetail,
   OrderView,
@@ -132,7 +134,12 @@ function buildChart(facts: MaterialFacts, context: RunContext, buckets: Bucket[]
   const qaRelease = bucketFlow(plan.qaReleases, buckets);
   const beforePlanned = bucketLevel(plan.projectedBeforePlanned, buckets);
   const confirmedOnly = bucketLevel(plan.projectedConfirmedOnly, buckets);
-  const afterPlanned = bucketLevel(plan.projectedAvailableFeasible, buckets);
+  // "The plan, if everything proposed is actually done" — including the orders
+  // whose release date has passed. The feasible curve, which leaves those out,
+  // is a different and equally necessary line; it drives the status word and
+  // the breach detection rather than this series.
+  const afterPlanned = bucketLevel(plan.projectedAvailable, buckets);
+  const afterFeasible = bucketLevel(plan.projectedAvailableFeasible, buckets);
   const cover = bucketLevel(plan.daysOfCover, buckets);
   const maxNorm = maxNormQty(facts);
 
@@ -166,6 +173,7 @@ function buildChart(facts: MaterialFacts, context: RunContext, buckets: Bucket[]
       balanceBeforePlanned: round(balance),
       balanceConfirmedOnly: round(confirmedOnly[index] as number),
       balanceAfterPlanned: round(afterPlanned[index] as number),
+      balanceAfterPlaceable: round(afterFeasible[index] as number),
       safetyStock: plan.safetyStock,
       maxNorm,
       daysOfCover: round1(cover[index] as number),
@@ -218,32 +226,37 @@ function buildGrid(
   const horizon = context.horizonDays;
 
   const { independent, dependent } = splitDemand(facts, context, horizon);
-  const netRequirement = new Float64Array(horizon + 1);
   const plannedReceipt = new Float64Array(horizon + 1);
   const lotSizingAddition = new Float64Array(horizon + 1);
-  const releaseSeries = new Float64Array(horizon + 1);
 
+  // Rows 10 and 11 are per *order*, so the quantity a rule added is charged
+  // once against the requirement that triggered it. Lot sizing can split one
+  // requirement across several receipts, and each slice carries the whole
+  // `netRequirement`, so crediting every slice would report the rule's
+  // contribution as many times as the order was cut.
+  const chargedRequirement = new Set<PlannedOrderExplanation>();
   for (const order of explanations) {
     const receiptDay = toEpochDay(order.receiptDate) - context.planningEpochDay;
-    if (receiptDay >= 0 && receiptDay <= horizon) {
-      netRequirement[receiptDay] = (netRequirement[receiptDay] as number) + order.netRequirement;
-      plannedReceipt[receiptDay] = (plannedReceipt[receiptDay] as number) + order.qty;
-      lotSizingAddition[receiptDay] =
-        (lotSizingAddition[receiptDay] as number) + Math.max(0, order.qty - order.netRequirement);
-    }
-    const releaseDay = toEpochDay(order.releaseDate) - context.planningEpochDay;
-    // A release date in the past is the finding, so it is carried at day zero
-    // and flagged rather than dropped for being off the left of the chart.
-    const slot = releaseDay < 0 ? 0 : releaseDay > horizon ? -1 : releaseDay;
-    if (slot !== -1) releaseSeries[slot] = (releaseSeries[slot] as number) + order.qty;
+    if (receiptDay < 0 || receiptDay > horizon) continue;
+    plannedReceipt[receiptDay] = (plannedReceipt[receiptDay] as number) + order.qty;
+
+    const sameRequirement = explanations.find(
+      (row) => row.requirementDay === order.requirementDay && chargedRequirement.has(row),
+    );
+    const alreadyCharged = sameRequirement !== undefined;
+    chargedRequirement.add(order);
+    const added = alreadyCharged ? order.qty : Math.max(0, order.qty - order.netRequirement);
+    lotSizingAddition[receiptDay] = (lotSizingAddition[receiptDay] as number) + added;
   }
+
+  const releaseCells = buildReleaseCells(explanations, context, buckets);
 
   const row = (
     key: string,
     label: string,
     series: ArrayLike<number>,
     aggregate: GridRow['aggregate'],
-    options: Partial<Pick<GridRow, 'indent' | 'emphasis' | 'tone' | 'note'>> = {},
+    options: Partial<Pick<GridRow, 'indent' | 'emphasis' | 'tone' | 'note' | 'cells'>> = {},
   ): GridRow => ({
     key,
     label,
@@ -253,6 +266,7 @@ function buildGrid(
     emphasis: options.emphasis ?? 'NONE',
     tone: options.tone ?? 'NEUTRAL',
     note: options.note ?? null,
+    ...(options.cells ? { cells: options.cells } : {}),
   });
 
   const inTransitOrQa = new Float64Array(horizon + 1);
@@ -285,7 +299,10 @@ function buildGrid(
       note: 'The honest position: stock and existing orders, with nothing the system is merely proposing.',
     }),
     row('safetyStock', 'Safety stock', safetyStockSeries, 'LAST', { emphasis: 'THRESHOLD' }),
-    row('netRequirement', 'Net requirement', netRequirement, 'SUM', {
+    // The engine's own series, not a reconstruction from the orders it went on
+    // to raise. Rebuilding it from recommendations loses every requirement lot
+    // sizing consolidated and repeats every one it split.
+    row('netRequirement', 'Net requirement', plan.netRequirements, 'SUM', {
       emphasis: 'ANSWER',
       note: 'Requirement plus safety stock, less the balance and the receipts already landing.',
     }),
@@ -296,19 +313,57 @@ function buildGrid(
       indent: 1,
       note: 'Quantity created by a rule rather than by demand.',
     }),
-    row('release', 'Planned order release', releaseSeries, 'SUM', {
+    // Under the bucket the receipt is needed in, the week it had to be ordered.
+    // A quantity keyed to the release bucket cannot say "W39 needed ordering in
+    // W26", which is the single most useful thing this screen shows.
+    row('release', 'Planned order release', new Float64Array(horizon + 1), 'SUM', {
       tone: 'PAST_IS_BAD',
       note: 'Offset back by the full lead-time chain. Red where the date has already passed.',
+      cells: releaseCells,
     }),
-    row('balanceAfter', 'Projected balance after planned orders', plan.projectedAvailableFeasible, 'LAST', {
+    row('balanceAfter', 'Projected balance after planned orders', plan.projectedAvailable, 'LAST', {
       emphasis: 'BALANCE',
       tone: 'NEGATIVE_IS_BAD',
-      note: 'The plan, if everything proposed is actually done — counting only orders that can still be placed.',
+      note: 'The plan, if every order it proposes is actually placed — including the ones whose release date has passed.',
     }),
     row('cover', 'Days of cover', plan.daysOfCover, 'LAST', {
       note: 'Forward-looking, at planned consumption.',
     }),
   ];
+}
+
+/**
+ * The planned-order release row, as dates against the bucket that needs them.
+ *
+ * "Not one of the orders the engine just proposed can be placed" is the finding
+ * the whole workbench exists to deliver, and it only reads as one when the week
+ * an order had to be released sits directly under the week it is needed.
+ */
+function buildReleaseCells(
+  explanations: PlannedOrderExplanation[],
+  context: RunContext,
+  buckets: Bucket[],
+): GridCell[][] {
+  const cells: GridCell[][] = buckets.map(() => []);
+
+  for (const order of explanations) {
+    const receiptDay = toEpochDay(order.receiptDate) - context.planningEpochDay;
+    const index = buckets.findIndex((bucket) => receiptDay >= bucket.startDay && receiptDay <= bucket.endDay);
+    if (index === -1) continue;
+
+    const releaseDay = toEpochDay(order.releaseDate) - context.planningEpochDay;
+    const weeksLate = releaseDay < 0 ? Math.ceil(-releaseDay / 7) : 0;
+    (cells[index] as GridCell[]).push({
+      text: weekLabel(order.releaseDate),
+      tone: order.isReleaseInPast ? 'PAST' : 'NEUTRAL',
+      releaseWeek: weekLabel(order.releaseDate),
+      releaseDate: order.releaseDate,
+      weeksLate,
+      qty: round(order.qty),
+    });
+  }
+
+  return cells;
 }
 
 /**
@@ -371,6 +426,7 @@ function buildParameters(facts: MaterialFacts, context: RunContext): ParameterVi
       status: value === null ? 'MISSING' : options.measured ? 'DRIFTED' : stale ? 'STALE' : 'FRESH',
       source: 'SAP material master',
       lastChangedOn: master.paramsLastChangedOn,
+      changedBy: master.paramsLastChangedBy,
       note: options.note ?? (stale ? `Set ${Math.round(ageDays / 30)} months ago and not revisited since.` : null),
       editable: options.editable ?? false,
     });
@@ -513,7 +569,10 @@ export function exceptionsFor(facts: MaterialFacts, context: RunContext): Except
       id: exception.id,
       code: exception.code,
       group: exception.group,
-      groupLabel: exception.group,
+      // The label, not the enum. Harmless only because the queue happened to
+      // read its own copy — a screen reading this one printed `CANNOT_ORDER`.
+      groupLabel: ACTION_GROUP_LABEL[exception.group],
+      score: exception.score,
       severity: exception.severity,
       itemId: exception.itemId,
       plantId: exception.plantId,
@@ -538,20 +597,72 @@ export function exceptionsFor(facts: MaterialFacts, context: RunContext): Except
 // Explain
 // ---------------------------------------------------------------------------
 
-export function explain(scenarioId: string, itemId: string, plantId: string): ExplainPayload | null {
+/**
+ * Which number is being explained.
+ *
+ * Explain opens from a cell, not from a screen. Without an anchor the panel can
+ * only ever describe the first recommendation on the material, which is the
+ * right answer to one of the fifteen rows and the wrong answer to the other
+ * fourteen — and the standard the product is held to is that *every* number
+ * traces to a source field in at most four clicks.
+ */
+export interface ExplainAnchor {
+  /** A grid row key — `netRequirement`, `balanceBefore`, and so on. */
+  row?: string;
+  /**
+   * The window the cell covers, as dates.
+   *
+   * Dates rather than a bucket index because the grid collapses daily buckets
+   * into weeks on the client, which renumbers them — an index would explain a
+   * Tuesday when the planner clicked a week.
+   */
+  fromDate?: string;
+  toDate?: string;
+}
+
+/** The span of days one cell covers. */
+interface CellWindow {
+  startDay: number;
+  endDay: number;
+  label: string;
+  week: string;
+}
+
+export function explain(
+  scenarioId: string,
+  itemId: string,
+  plantId: string,
+  anchor: ExplainAnchor = {},
+): ExplainPayload | null {
   const context = runContext(scenarioId);
   const facts = context.materials.get(planKey(itemId, plantId));
   if (!facts) return null;
 
   const explanations = context.plan.orderExplanations.get(planKey(itemId, plantId)) ?? [];
-  const order = explanations[0] ?? null;
+  const window = windowOf(anchor, context);
+
+  // The recommendation the anchored window is about, where there is one; the
+  // material's first otherwise, which is what the screen-level button asks for.
+  const anchoredOrder =
+    window === undefined
+      ? null
+      : (explanations.find((row) => {
+          const day = toEpochDay(row.receiptDate) - context.planningEpochDay;
+          return day >= window.startDay && day <= window.endDay;
+        }) ?? null);
+
+  const order = anchoredOrder ?? explanations[0] ?? null;
   const biteDay = facts.firstStockoutDay !== -1 ? facts.firstStockoutDay : facts.firstBreachDay;
 
   return {
     itemId,
     plantId,
+    anchor: window === undefined ? null : { row: anchor.row ?? null, label: window.label, week: window.week },
     sentence: buildSentence(facts, context, order, biteDay),
-    arithmetic: buildArithmetic(facts, context, order),
+    arithmetic:
+      window === undefined || anchor.row === undefined
+        ? buildArithmetic(facts, context, order)
+        : buildCellArithmetic(facts, context, anchor.row, window, anchoredOrder),
     chain: buildChainWalk(facts, context, order),
     provenance: buildProvenance(facts, context),
     categoryCheck: facts.categorySiblings.map((sibling) => ({
@@ -629,6 +740,172 @@ function buildSentence(
  * Displayed components sum to displayed totals. Rounding and lot sizing are
  * their own lines, never absorbed into a figure that then does not foot.
  */
+/**
+ * The days an anchor covers, clamped to the horizon.
+ *
+ * A single date is one day; a range is the week the grid was showing. Absent or
+ * unparseable, there is no anchor and the panel falls back to the material's
+ * first recommendation.
+ */
+function windowOf(anchor: ExplainAnchor, context: RunContext): CellWindow | undefined {
+  if (!anchor.fromDate) return undefined;
+  const startDay = toEpochDay(anchor.fromDate) - context.planningEpochDay;
+  if (!Number.isFinite(startDay)) return undefined;
+
+  const rawEnd = anchor.toDate ? toEpochDay(anchor.toDate) - context.planningEpochDay : startDay;
+  const endDay = Math.min(context.horizonDays, Math.max(startDay, Number.isFinite(rawEnd) ? rawEnd : startDay));
+  if (startDay < 0 || startDay > context.horizonDays) return undefined;
+
+  const week = weekLabel(anchor.fromDate);
+  return { startDay, endDay, label: endDay > startDay ? week : anchor.fromDate, week };
+}
+
+/**
+ * The arithmetic behind one cell.
+ *
+ * Each row is a different question, so each gets its own working rather than
+ * the material's first recommendation dressed up. A balance is the roll that
+ * produced it; a requirement is the explosion that produced it; a release date
+ * is the chain it was walked back over. The rows that *are* the recommendation
+ * fall through to the full working below.
+ */
+function buildCellArithmetic(
+  facts: MaterialFacts,
+  context: RunContext,
+  row: string,
+  bucket: CellWindow,
+  order: PlannedOrderExplanation | null,
+): ExplainLine[] {
+  const uom = facts.baseUom;
+  const lines: ExplainLine[] = [];
+  const push = (
+    label: string,
+    value: number | null,
+    operator: ExplainLine['operator'],
+    source: string | null,
+    options: { emphasis?: boolean; expandable?: boolean } = {},
+  ): void => {
+    lines.push({
+      label,
+      value: value === null ? null : round(value),
+      uom,
+      operator,
+      source,
+      emphasis: options.emphasis ?? false,
+      expandable: options.expandable ?? false,
+    });
+  };
+
+  const flow = (series: Float64Array): number => {
+    let total = 0;
+    for (let day = bucket.startDay; day <= bucket.endDay; day += 1) total += series[day] as number;
+    return total;
+  };
+  const closing = (series: Float64Array): number => series[bucket.endDay] as number;
+  const opening = (series: Float64Array): number =>
+    bucket.startDay === 0 ? facts.plan.openingStock : (series[bucket.startDay - 1] as number);
+
+  // `W39`, not `W39 (W39)` — the label and the week are the same string on a
+  // weekly cell, and only differ on a daily one.
+  const where = bucket.label === bucket.week ? bucket.week : `${bucket.label} (${bucket.week})`;
+
+  switch (row) {
+    case 'gross':
+    case 'independent':
+    case 'dependent': {
+      const independent = flow(facts.plan.underlyingDemand);
+      const gross = flow(facts.plan.grossRequirements);
+      push(`Independent demand, ${where}`, independent, '', 'Production schedule and customer orders');
+      push('From bill-of-material explosion', gross - independent, '+', 'Aggregated across every parent', {
+        expandable: true,
+      });
+      push('Gross requirement', gross, '=', null, { emphasis: true });
+      return lines;
+    }
+
+    case 'confirmed':
+    case 'committed':
+    case 'quarantine': {
+      push(`Acknowledged by the vendor, ${where}`, flow(facts.plan.confirmedReceipts), '', 'Tier 1 — confirmed');
+      push('Ordered, not acknowledged', flow(facts.plan.committedReceipts), '+', 'Tier 2 — committed');
+      push('Scheduled receipts', flow(facts.plan.scheduledReceipts), '=', null, { emphasis: true });
+      push('of which clearing quality inspection', flow(facts.plan.qaReleases), '', 'On site, and not yet stock');
+      return lines;
+    }
+
+    case 'balanceBefore':
+    case 'balanceAfter': {
+      const after = row === 'balanceAfter';
+      const series = after ? facts.plan.projectedAvailable : facts.plan.projectedBeforePlanned;
+      push(`Balance entering ${bucket.week}`, opening(series), '', 'Rolled from opening stock', { expandable: true });
+      push('Scheduled receipts', flow(facts.plan.scheduledReceipts), '+', 'Open purchase order schedule lines');
+      if (after) push('Planned order receipts', flow(facts.plan.plannedReceipts), '+', 'Orders this run proposes');
+      push('Gross requirement', flow(facts.plan.grossRequirements), '−', 'Demand in this bucket', {
+        expandable: true,
+      });
+      push(`Balance closing ${bucket.week}`, closing(series), '=', null, { emphasis: true });
+      if (!after) {
+        push(
+          'Safety stock',
+          facts.plan.safetyStock,
+          '',
+          `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`,
+        );
+      }
+      return lines;
+    }
+
+    case 'safetyStock': {
+      push(
+        'Safety stock',
+        facts.plan.safetyStock,
+        '',
+        `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`,
+      );
+      push('Maintained days of cover', facts.itemPlant.maintainedStockDays, '', 'Material master');
+      push('Mean daily demand', facts.dailyDemandMean, '', 'Across the planning horizon');
+      return lines;
+    }
+
+    case 'cover': {
+      push(`Balance closing ${bucket.week}`, closing(facts.plan.projectedAvailable), '', 'Rolled from opening stock');
+      push('Mean daily demand', facts.dailyDemandMean, '÷', 'Forward consumption at the planned rate');
+      push('Days of cover', closing(facts.plan.daysOfCover), '=', null, { emphasis: true });
+      return lines;
+    }
+
+    case 'netRequirement': {
+      const gross = flow(facts.plan.grossRequirements);
+      const receipts = flow(facts.plan.scheduledReceipts);
+      const before = opening(facts.plan.projectedBeforePlanned);
+      push(`Gross requirement, ${where}`, gross, '', 'Bill-of-material explosion', { expandable: true });
+      push(
+        'Safety stock',
+        facts.plan.safetyStock,
+        '+',
+        `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`,
+      );
+      push('Required position', gross + facts.plan.safetyStock, '=', null, { emphasis: true });
+      push(`Balance entering ${bucket.week}`, before, '', 'Rolled from opening stock', { expandable: true });
+      push('Scheduled receipts', receipts, '+', 'Open purchase order schedule lines');
+      push('Available position', before + receipts, '=', null, { emphasis: true });
+      // Stated, not claimed as this block's difference. Over a week the engine
+      // walks day by day and tops the balance up as it goes, so the bucket's
+      // requirement is the sum of the daily shortfalls rather than the gap
+      // between these two totals — and printing an equals sign over that would
+      // be exactly the kind of arithmetic this panel exists to avoid.
+      push('NET REQUIREMENT', flow(facts.plan.netRequirements), '', 'Summed from the daily netting walk', {
+        emphasis: true,
+      });
+      return lines;
+    }
+
+    default:
+      // Rows 10 to 12 *are* the recommendation, so they get its full working.
+      return buildArithmetic(facts, context, order);
+  }
+}
+
 function buildArithmetic(
   facts: MaterialFacts,
   context: RunContext,
@@ -666,18 +943,34 @@ function buildArithmetic(
   const requirement = facts.plan.grossRequirements[order.requirementDay] as number;
   const requirementDate = fromEpochDay(context.planningEpochDay + order.requirementDay);
 
-  push(`Gross requirement, ${weekLabel(requirementDate)}`, requirement, '', 'Bill-of-material explosion', {
+  push(`Gross requirement, ${requirementDate}`, requirement, '', 'Bill-of-material explosion', {
     expandable: true,
   });
   push('Safety stock', order.threshold, '+', `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`);
-  push('Required position', requirement + order.threshold, '=', null, { emphasis: true });
+  const required = requirement + order.threshold;
+  push('Required position', required, '=', null, { emphasis: true });
 
-  push('Projected balance before this bucket', order.balanceBefore, '', 'Rolled from opening stock', {
+  // The receipts actually landing that day, not a literal zero. Every material
+  // with an inbound delivery in its requirement bucket printed `+0` here, under
+  // a heading promising the components sum to the total.
+  //
+  // And the balance is the one *entering* the day, which is what the label has
+  // always said and not what it used to show: `balanceBefore` on the
+  // explanation is the balance netting was topping up *from*, after the day's
+  // demand and receipts had already moved it.
+  const receipts = facts.plan.scheduledReceipts[order.requirementDay] as number;
+  const entering = order.balanceBefore + requirement - receipts;
+  push(`Balance entering ${requirementDate}`, entering, '', 'Rolled from opening stock', {
     expandable: true,
   });
-  push('Scheduled receipts in the bucket', 0, '+', 'Open purchase order schedule lines');
-  push('Available position', order.balanceBefore, '=', null, { emphasis: true });
+  push('Scheduled receipts that day', receipts, '+', 'Open purchase order schedule lines');
+  const available = entering + receipts;
+  push('Available position', available, '=', null, { emphasis: true });
 
+  // Restated as its own subtraction rather than asserted. A line that claims to
+  // be an equals sign has to be one.
+  push('Required position', required, '', 'From above');
+  push('Available position', available, '−', 'From above');
   push('NET REQUIREMENT', order.netRequirement, '=', 'Required position less available position', { emphasis: true });
 
   const lotSizing = Math.max(0, order.qty - order.netRequirement);
@@ -701,7 +994,11 @@ function buildArithmetic(
     );
   }
   push('PLANNED ORDER RECEIPT', order.qty, '=', null, { emphasis: true });
-  void lotSizing;
+  // Under the total, the way row 11 of the grid sits under row 10. Above it,
+  // this restatement broke the running sum it was standing in the middle of.
+  if (lotSizing > 0) {
+    push('of which added by a rule rather than by demand', lotSizing, '', 'Need and rule are never merged');
+  }
 
   push(
     `Lead time ${order.totalOffsetDays} days`,
@@ -871,6 +1168,7 @@ function buildProvenance(facts: MaterialFacts, context: RunContext): ProvenanceR
     value,
     system: 'SAP material master',
     lastChangedOn: master.paramsLastChangedOn,
+    changedBy: master.paramsLastChangedBy,
     ageDays,
   });
 

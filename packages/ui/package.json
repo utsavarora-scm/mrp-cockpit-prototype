@@ -4,7 +4,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "lint": "eslint \"src/**/*.ts\" --fix"
+    "lint": "eslint \"src/**/*.ts\" --fix",
+    "lint:check": "eslint \"src/**/*.ts\""
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.11",

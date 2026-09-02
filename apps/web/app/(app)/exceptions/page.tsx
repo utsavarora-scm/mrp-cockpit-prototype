@@ -70,7 +70,10 @@ export default function ExceptionsPage() {
                 <p className='text-muted-foreground text-[12px]'>{group.note}</p>
               </div>
               <p className='text-muted-foreground text-[12px]'>
-                {group.count} {group.count === 1 ? 'material' : 'materials'} ·{' '}
+                {/* Say when the list is shorter than the count. A header reading
+                    47 above a list of 25 is a header nobody can act on. */}
+                {group.shown < group.count ? `${group.shown} of ${group.count} shown` : group.count}{' '}
+                {group.count === 1 ? 'material' : 'materials'} ·{' '}
                 <span className='text-foreground font-medium'>{formatCurrency(group.valueAtStake)}</span> at stake
               </p>
             </div>
@@ -132,6 +135,12 @@ export default function ExceptionsPage() {
                       className='text-primary text-[12px] font-medium hover:underline'
                     >
                       Build a schedule
+                    </Link>
+                    <Link
+                      href={`/material/${encodeURIComponent(exception.itemId)}/${encodeURIComponent(exception.plantId)}?explain=balanceBefore&from=${exception.biteDate}`}
+                      className='text-primary text-[12px] font-medium hover:underline'
+                    >
+                      Explain the number
                     </Link>
                     <button
                       type='button'

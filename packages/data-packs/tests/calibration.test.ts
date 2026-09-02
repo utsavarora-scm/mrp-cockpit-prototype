@@ -13,8 +13,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { runMrp } from '@repo/planning-engine';
-import { fromEpochDay, isoWeekNumber, planKey, toEpochDay } from '@repo/domain';
+import { leadTimeChain, primaryVendor, runMrp } from '@repo/planning-engine';
+import { fromEpochDay, isoWeekNumber, planKey, toEpochDay, type ItemVendor } from '@repo/domain';
 
 import { CHAIN_FG, CHAIN_ITEMS, getDataPack, HERO_PM, HERO_RM, HERO_RM_TWIN, SOAP_CHAIN } from '../src/index';
 
@@ -95,6 +95,53 @@ describe('the maintained lead-time chains', () => {
       hero.grProcessingTimeDays +
       hero.qaQuarantineDays;
     expect(chain).toBe(hero.maintainedLeadTimeDays);
+  });
+
+  it('holds for every bought material in the book, not only the pinned three', () => {
+    // The convention has to be the same everywhere or the fence and the netting
+    // offset disagree — and they disagree quietly, on materials nobody is
+    // looking at, in a demo whose whole argument is that the fence is where the
+    // decision lives.
+    const vendorsByKey = new Map<string, ItemVendor[]>();
+    for (const row of snapshot.itemVendors) {
+      const key = planKey(row.itemId, row.plantId);
+      vendorsByKey.set(key, [...(vendorsByKey.get(key) ?? []), row]);
+    }
+
+    let checked = 0;
+    for (const master of snapshot.itemPlants) {
+      if (master.procurementType !== 'BUY' || master.leadTimeDays === null) continue;
+      const vendor = primaryVendor(vendorsByKey.get(planKey(master.itemId, master.plantId)));
+      const chain = leadTimeChain(master, vendor);
+
+      // The chain decomposes the master's total rather than exceeding it, which
+      // is only true while goods receipt and quality release sit inside it.
+      expect(chain.totalDays).toBe(master.leadTimeDays);
+      expect(master.leadTimeDays).toBeGreaterThanOrEqual(master.grProcessingTimeDays + master.qaQuarantineDays);
+      checked += 1;
+    }
+    expect(checked).toBeGreaterThan(100);
+  });
+
+  it('offsets every planned order by the chain the fence is drawn from', () => {
+    const vendorsByKey = new Map<string, ItemVendor[]>();
+    for (const row of snapshot.itemVendors) {
+      const key = planKey(row.itemId, row.plantId);
+      vendorsByKey.set(key, [...(vendorsByKey.get(key) ?? []), row]);
+    }
+    const masterByKey = new Map(snapshot.itemPlants.map((row) => [planKey(row.itemId, row.plantId), row]));
+
+    let checked = 0;
+    for (const [key, orders] of plan.orderExplanations) {
+      const master = masterByKey.get(key);
+      if (!master || master.procurementType !== 'BUY') continue;
+      const chain = leadTimeChain(master, primaryVendor(vendorsByKey.get(key)));
+      for (const order of orders) {
+        expect(order.totalOffsetDays).toBe(chain.totalDays + master.safetyTimeDays);
+        checked += 1;
+      }
+    }
+    expect(checked).toBeGreaterThan(50);
   });
 
   it('separates the import from its twin by two months of lead time', () => {

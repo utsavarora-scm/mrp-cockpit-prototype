@@ -265,10 +265,14 @@ function MaterialTable({ rows }: { rows: PositionRow[] }) {
               <td className='text-muted-foreground grid-cell text-[12px]'>{row.itemType}</td>
               <td className='grid-cell num'>
                 {row.firstBreachDate ? (
-                  <span>
+                  <Link
+                    href={`/material/${encodeURIComponent(row.itemId)}/${encodeURIComponent(row.plantId)}?explain=balanceBefore&from=${row.firstBreachDate}`}
+                    className='hover:text-primary hover:underline'
+                    title='Explain this breach'
+                  >
                     {row.firstBreachWeek}
                     <span className='text-muted-foreground ml-1.5 text-[11px]'>{row.firstBreachDate.slice(5)}</span>
-                  </span>
+                  </Link>
                 ) : (
                   <span className='text-muted-foreground'>—</span>
                 )}

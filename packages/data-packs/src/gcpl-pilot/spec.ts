@@ -75,6 +75,7 @@ export const HERO_RM = {
   maintainedOrderDays: 90,
   maxNormDays: 120,
   paramsLastChangedOn: '2024-03-14',
+  paramsLastChangedBy: 'Category planning',
   serviceLevelTarget: 0.95,
   storageCapacity: 6_000,
   dailyReceivingCapacity: 400,
@@ -108,7 +109,13 @@ export const HERO_RM = {
    */
   observedTotalDays: [88, 112, 97, 121, 103, 94, 118, 99] as const,
 
-  /** Weekly gross requirement the pre-summer noodle build implies, in MT. */
+  /**
+   * Weekly gross requirement the pre-summer noodle build implies, in MT.
+   *
+   * The PRD's own table, and the series the whole worked example is read off.
+   * Not documentation: the soap ramp above is derived from it by dividing
+   * through the chain, so this is what the hero actually nets on.
+   */
   weeklyRequirement: [660, 690, 720, 800, 890, 970, 1_030, 1_030] as const,
 } as const;
 
@@ -142,6 +149,7 @@ export const HERO_RM_TWIN = {
   maintainedOrderDays: 45,
   maxNormDays: 70,
   paramsLastChangedOn: '2024-03-14',
+  paramsLastChangedBy: 'Category planning',
   serviceLevelTarget: 0.95,
   storageCapacity: 3_000,
   dailyReceivingCapacity: 300,
@@ -193,6 +201,7 @@ export const HERO_PM = {
   maintainedOrderDays: 21,
   maxNormDays: 35,
   paramsLastChangedOn: '2023-11-02',
+  paramsLastChangedBy: 'Packaging development',
   serviceLevelTarget: 0.95,
 
   /** The volumetric ceiling. Dominant for packaging, and the binding one here. */
@@ -207,25 +216,28 @@ export const HERO_PM = {
   minGapDays: 4,
 
   /**
-   * The plant opens the campaign holding more than its nominal ceiling.
+   * Sized so the campaign opens on the 260,000 pcs the worked example states.
    *
-   * Not an error in the data — it is the situation. Empty bottles are almost
-   * all air, the last campaign over-delivered, and the floor is full. That is
-   * exactly why the volumetric ceiling and not the vendor turns out to be the
-   * binding constraint on the next six weeks, which is the finding the worked
-   * example exists to produce.
+   * W36 carries only the tail of the last promotion — 18,000 pcs — so the
+   * position entering W37, which is where the six-week schedule starts, is
+   * 278,000 − 18,000. The ceiling still binds and the vendor still does not:
+   * 260,000 − 180,000 + 240,000 is exactly the 320,000 the floor holds, which
+   * is the finding the worked example exists to produce.
    */
-  openingStock: 345_000,
+  openingStock: 278_000,
   /** Six-week campaign — fixed-period lot sizing. */
   fixedPeriodDays: 42,
 
   /**
    * Weekly gross requirement from W36, in pieces — the promotion build the
    * six-week campaign is sized against. Held flat after the promotion ends.
+   *
+   * W37 onward is the PRD's own table. The refill finished good above is seeded
+   * from these figures grossed up for line scrap, so what the *bottle* nets on
+   * is exactly what the worked example says it is.
    */
-  // The promotion starts in W37; this week carries only the tail of the last
-  // one, which is why the position entering the campaign is as full as it is.
-  weeklyRequirement: [18_000, 178_000, 208_000, 237_000, 237_000, 198_000, 178_000, 176_000] as const,
+  // The promotion starts in W37; this week carries only the tail of the last one.
+  weeklyRequirement: [18_000, 180_000, 210_000, 240_000, 240_000, 200_000, 180_000, 180_000] as const,
 
   observedTotalDays: [11, 9, 13, 10, 12, 10, 14, 10] as const,
 } as const;

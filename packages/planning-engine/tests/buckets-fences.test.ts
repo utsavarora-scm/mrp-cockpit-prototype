@@ -152,13 +152,22 @@ describe('the lead-time chain', () => {
 describe('the fence', () => {
   const base = { planningEpochDay: PLANNING_EPOCH, calendar: SIX_DAY, horizonDays: 182 };
 
-  it('walks working days rather than subtracting calendar ones', () => {
+  it('counts calendar days, then snaps forward to a day the plant can receive on', () => {
+    // A procurement lead time is calendar days: a vessel sails through the
+    // weekend and a customs queue does not observe one. Walking working days
+    // for a 90-day import overstates it by more than two weeks and moves the
+    // fence past the point where it means anything.
+    //
+    // Day 12 from Mon 31 Aug 2026 is Sat 12 Sep — a working day on a six-day
+    // week, so the fence lands exactly on the twelfth day.
     const sixDay = computeFences({ ...base, maintainedChainDays: 12, measuredTotalDays: null });
+    expect(sixDay.maintained.earliestReceiptDay).toBe(12);
+
+    // On a five-day week the same date is a Saturday, so it snaps forward to
+    // Monday — two days, not the four a working-day walk would have added. A
+    // delivery scheduled into a shutdown is a delivery turned away at the gate.
     const fiveDay = computeFences({ ...base, calendar: FIVE_DAY, maintainedChainDays: 12, measuredTotalDays: null });
-    // Twelve working days on a five-day week reaches further into the calendar
-    // than twelve on a six-day week. A lead time that lands mid-shutdown is not
-    // a lead time.
-    expect(fiveDay.maintained.earliestReceiptDay).toBeGreaterThan(sixDay.maintained.earliestReceiptDay);
+    expect(fiveDay.maintained.earliestReceiptDay).toBe(14);
   });
 
   it('draws a second fence from what the receipts measured', () => {

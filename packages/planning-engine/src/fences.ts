@@ -56,6 +56,10 @@ export interface LeadTimeChain {
  * measures independently anyway. That keeps the intervals summing to the total
  * a planner can look up in SAP, which matters more than any one interval being
  * separately defensible.
+ *
+ * That plug is only defensible for the **primary planning source**, because
+ * `itemPlant.leadTimeDays` is the primary's maintained total. For any other
+ * vendor on the same material, use `alternateLeadTimeChain`.
  */
 export function leadTimeChain(itemPlant: ItemPlant, vendor: ItemVendor | null): LeadTimeChain {
   const response = vendor?.acknowledgementDays ?? 0;
@@ -119,6 +123,72 @@ export function leadTimeChain(itemPlant: ItemPlant, vendor: ItemVendor | null): 
     intervals,
     totalDays: intervals.reduce((sum, interval) => sum + interval.days, 0),
     vendorQuotedDays: readiness,
+  };
+}
+
+/**
+ * The chain for a source that is *not* the one the plan nets on.
+ *
+ * `leadTimeChain` back-solves vendor readiness from `itemPlant.leadTimeDays`,
+ * which is the maintained total of the **primary** source. Pass it a second
+ * vendor and it returns the primary's total with that vendor's intervals
+ * rearranged around it — the right answer to the wrong question, and a
+ * comfortable way to tell a planner an alternate reaches a week it cannot.
+ *
+ * So an alternate is summed from its own record instead. There is no maintained
+ * total to reconcile against and none is invented: what the vendor's own
+ * numbers add up to is what the alternate's fence is drawn from.
+ */
+export function alternateLeadTimeChain(itemPlant: ItemPlant, vendor: ItemVendor): LeadTimeChain {
+  const intervals: ChainInterval[] = [
+    {
+      key: 'response',
+      label: 'Vendor response',
+      days: vendor.acknowledgementDays,
+      owner: 'Sourcing',
+      note: 'Purchase order released to vendor acknowledgement.',
+    },
+    {
+      key: 'readiness',
+      label: 'Vendor readiness',
+      days: vendor.leadTimeDays,
+      owner: 'Vendor',
+      note: "Acknowledgement to dispatch. The vendor's own quoted time.",
+    },
+    {
+      key: 'transit',
+      label: 'Transit',
+      days: vendor.transitDays,
+      owner: 'Logistics',
+      note: 'Dispatch to arrival at the gate.',
+    },
+    {
+      key: 'customs',
+      label: 'Customs and clearance',
+      days: vendor.customsDays,
+      owner: 'Logistics',
+      note: 'Import clearance. Zero on a domestic lane.',
+    },
+    {
+      key: 'goodsReceipt',
+      label: 'Goods receipt',
+      days: itemPlant.grProcessingTimeDays,
+      owner: 'Plant',
+      note: 'Gate-in, unloading and put-away.',
+    },
+    {
+      key: 'qaRelease',
+      label: 'Quality release',
+      days: itemPlant.qaQuarantineDays,
+      owner: 'Plant / QC',
+      note: 'Quarantine and release against the certificate of analysis.',
+    },
+  ];
+
+  return {
+    intervals: intervals.filter((interval) => interval.days > 0 || interval.key === 'readiness'),
+    totalDays: intervals.reduce((sum, interval) => sum + interval.days, 0),
+    vendorQuotedDays: vendor.leadTimeDays,
   };
 }
 

@@ -101,6 +101,16 @@ export interface MaterialFacts {
   firstStockoutDay: number;
   /** Days of cover today, at planned consumption. */
   daysOfCoverToday: number;
+  /** Whether a made material has a bill of material at all. */
+  hasBom: boolean;
+  /**
+   * Batches on hand with a dated expiry.
+   *
+   * Generated all along and read by nothing: expiry is a different question
+   * from forward cover, and the screens that claimed to show "excess **or
+   * expiry** risk" were only ever answering the first half.
+   */
+  expiringBatches: Array<{ batchId: string; qty: number; expiryDate: string; daysToExpiry: number }>;
 }
 
 const CACHE = new WeakMap<MrpResult, RunContext>();
@@ -154,6 +164,7 @@ function build(scenarioId: string, snapshot: PlanningSnapshot, plan: MrpResult):
   }
 
   const measuredByKey = measureLeadTimes(snapshot);
+  const stockByKey = new Map(snapshot.stock.map((row) => [planKey(row.itemId, row.plantId), row]));
 
   // Which components share a parent — the horizontal check, built once.
   const siblingsByComponent = new Map<string, Array<{ itemId: string; parentItemId: string }>>();
@@ -253,6 +264,16 @@ function build(scenarioId: string, snapshot: PlanningSnapshot, plan: MrpResult):
       firstBreachDay,
       firstStockoutDay,
       daysOfCoverToday: itemPlan.daysOfCover[0] as number,
+      hasBom: (componentsByParent.get(key) ?? []).length > 0,
+      expiringBatches: (stockByKey.get(key)?.batches ?? [])
+        .filter((batch) => batch.expiryDate !== null && batch.qty > 0)
+        .map((batch) => ({
+          batchId: batch.batchId,
+          qty: batch.qty,
+          expiryDate: batch.expiryDate as string,
+          daysToExpiry: toEpochDay(batch.expiryDate as string) - planningEpochDay,
+        }))
+        .sort((a, b) => a.daysToExpiry - b.daysToExpiry),
     });
   }
 
@@ -395,6 +416,8 @@ export function toMaterialContext(facts: MaterialFacts, plan: MrpResult): Materi
     openLines: facts.openLines,
     categorySiblings: facts.categorySiblings,
     horizontalSiblings: facts.horizontalSiblings,
+    hasBom: facts.hasBom,
+    expiringBatches: facts.expiringBatches,
   };
 }
 

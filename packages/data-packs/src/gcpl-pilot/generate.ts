@@ -287,6 +287,40 @@ function bom(
  * with the conversion losses on the steps that actually incur them, rather than
  * folded into one convenient multiplier.
  */
+/** Bars broken on the soap line, between the finished good and the noodle. */
+const SOAP_TO_NOODLE_SCRAP = 0.005;
+
+/**
+ * Tonnes of imported oil behind one bar of soap.
+ *
+ * Every factor between the sponsor's own number and the hero's requirement,
+ * multiplied out — the same product the explain panel walks through one step at
+ * a time. Derived from `SOAP_CHAIN` rather than written down, so a change to
+ * the blend ratio moves the demand that produces the worked example instead of
+ * quietly invalidating it.
+ */
+export const OIL_MT_PER_SOAP_BAR =
+  SOAP_CHAIN.barWeightMt *
+  SOAP_CHAIN.noodleFactor *
+  (1 + SOAP_TO_NOODLE_SCRAP) *
+  (SOAP_CHAIN.oilContent / SOAP_CHAIN.dfaStageYield) *
+  ((SOAP_CHAIN.pfadBlendShare * SOAP_CHAIN.importSourceShare) / SOAP_CHAIN.conversionYield);
+
+/**
+ * The soap bars that draw on the pinned noodle.
+ *
+ * Shared by the bill-of-material builder and the demand builder, because the
+ * hero's requirement is the *sum* of what they all pull: pinning one ramp
+ * without knowing the others would land the worked example somewhere close to
+ * the PRD's table rather than on it.
+ */
+function soapBarFgIds(fgs: Item[]): string[] {
+  return fgs
+    .filter((fg) => fg.description.includes('Soap Bar') || fg.id === CHAIN_FG.soap.itemId)
+    .slice(0, 12)
+    .map((fg) => fg.id);
+}
+
 function heroChainBoms(soapFgIds: string[]): BomLine[] {
   const c = SOAP_CHAIN;
   const lines: BomLine[] = [];
@@ -295,7 +329,7 @@ function heroChainBoms(soapFgIds: string[]): BomLine[] {
     lines.push(
       bom(fgId, PILOT_PLANT, CHAIN_ITEMS.noodle.itemId, c.barWeightMt * c.noodleFactor, {
         label: 'Soap to noodle',
-        scrapPct: 0.005,
+        scrapPct: SOAP_TO_NOODLE_SCRAP,
       })
     );
   }
@@ -331,7 +365,14 @@ function heroChainBoms(soapFgIds: string[]): BomLine[] {
   // Hero B hangs off the refill finished good: one bottle per unit, plus the
   // siblings a planner has to check before expediting any one of them.
   lines.push(
-    bom(CHAIN_FG.refill.itemId, PILOT_PLANT, HERO_PM.itemId, 1, { label: 'One bottle per unit', scrapPct: 0.012 }),
+    // No scrap uplift on the hero's own line, deliberately. A percentage here
+    // makes the bottle's requirement a fraction of a pallet away from the
+    // campaign it is quoted against, and the schedule builder then rounds a
+    // whole 10,000-unit pallet off the warehouse headroom to stay under the
+    // ceiling — a ten-thousand-unit answer moving on a five-unit input. The
+    // siblings below still carry theirs, so scrap remains visible where it
+    // costs nothing to read.
+    bom(CHAIN_FG.refill.itemId, PILOT_PLANT, HERO_PM.itemId, 1, { label: 'One bottle per unit' }),
     bom(CHAIN_FG.refill.itemId, PILOT_PLANT, `PM-${ID_BASE.PM + 40}`, 1, {
       label: 'One closure per unit',
       scrapPct: 0.01,
@@ -366,10 +407,7 @@ function buildBoms(rng: Rng, items: Item[], plants: Plant[]): BomLine[] {
   // Soap bars other than the pinned one also draw on the pinned noodle, which
   // is the point of low-level-code sequencing: a shared intermediate must see
   // every parent's demand before it is netted.
-  const soapFgIds = fgs
-    .filter((fg) => fg.description.includes('Soap Bar') || fg.id === CHAIN_FG.soap.itemId)
-    .slice(0, 12)
-    .map((fg) => fg.id);
+  const soapFgIds = soapBarFgIds(fgs);
   lines.push(...heroChainBoms(soapFgIds));
 
   for (const plant of plants) {
@@ -484,11 +522,25 @@ function buildDemand(rng: Rng, items: Item[], plants: Plant[]): { demand: Demand
   const totalDays = SPEC.horizonDays + DEMAND_TAIL_DAYS;
   const fgs = items.filter((item) => item.type === 'FG');
 
+  // Every raw series first, in one pass, so the seeded draws keep their order.
+  // Only then can the pinned soap ramp be solved: the hero's requirement is
+  // what *all* the soap bars pull through the shared noodle, so the ramp has to
+  // be set against the others rather than beside them.
+  const rawByKey = new Map<string, Float64Array>();
+  for (const fg of fgs) {
+    for (const plant of plants) {
+      if (!producesAt(fg, plant)) continue;
+      rawByKey.set(`${fg.id}@${plant.id}`, pinnedSeries(fg.id, plant, totalDays) ?? baselineSeries(rng, totalDays));
+    }
+  }
+  const pilot = plants.find((plant) => plant.id === PILOT_PLANT);
+  if (pilot) solveSoapRamp(rawByKey, fgs, pilot, totalDays);
+
   for (const fg of fgs) {
     for (const plant of plants) {
       if (!producesAt(fg, plant)) continue;
 
-      const raw = pinnedSeries(fg.id, plant.id, totalDays) ?? baselineSeries(rng, totalDays);
+      const raw = rawByKey.get(`${fg.id}@${plant.id}`) as Float64Array;
       const series = onWorkingDays(raw, plant, totalDays);
       for (let day = 0; day < totalDays; day += 1) {
         const qty = series[day] as number;
@@ -526,54 +578,96 @@ function buildDemand(rng: Rng, items: Item[], plants: Plant[]): { demand: Demand
  * execution zone read as a series of cliffs that are an artefact of bucketing
  * rather than of the plan.
  */
-function pinnedSeries(itemId: string, plantId: string, totalDays: number): Float64Array | null {
-  if (plantId !== PILOT_PLANT) return null;
+function pinnedSeries(itemId: string, plant: Plant, totalDays: number): Float64Array | null {
+  if (plant.id !== PILOT_PLANT) return null;
 
   if (itemId === CHAIN_FG.soap.itemId) {
-    // Soap in bars, sized so the chain lands the hero's requirement in the
-    // band the pre-summer noodle build implies. Rising through the build,
-    // flat after it.
-    return rampSeries(totalDays, { startWeekly: 17_600_000, peakWeekly: 39_600_000, rampWeeks: 7, jitter: 0.012 });
+    // Soap in bars, sized so that what reaches the imported oil below is
+    // exactly the pre-summer build the worked example states. Divided by the
+    // chain rather than guessed at, and then reduced by what the other soap
+    // bars pull — see `solveSoapRamp`.
+    const bars = HERO_RM.weeklyRequirement.map((mt) => mt / OIL_MT_PER_SOAP_BAR);
+    return spreadWeekly(bars, plant, totalDays);
   }
 
   if (itemId === CHAIN_FG.refill.itemId) {
-    // The refill's promotion, week by week. Written as a series rather than a
-    // curve because the six-week campaign in the schedule-builder example is
-    // sized against these exact weeks.
-    return weeklySeries(totalDays, HERO_PM.weeklyRequirement);
+    // The refill's promotion, week by week. One bottle per unit and no scrap
+    // on that line, so what the *bottle* nets on is exactly the campaign the
+    // schedule-builder example is sized against.
+    return spreadWeekly(HERO_PM.weeklyRequirement, plant, totalDays);
   }
 
   return null;
 }
 
-function rampSeries(
-  totalDays: number,
-  spec: { startWeekly: number; peakWeekly: number; rampWeeks: number; jitter: number }
-): Float64Array {
-  const series = new Float64Array(totalDays);
-  for (let day = 0; day < totalDays; day += 1) {
-    const week = day / 7;
-    const progress = Math.min(1, week / spec.rampWeeks);
-    const weekly = spec.startWeekly + (spec.peakWeekly - spec.startWeekly) * progress;
-    // A stable, seeded wobble so the chart is not a straight line, without
-    // adding variability the norms argument would then have to explain away.
-    // The ramp *is* the pre-summer build, so no second seasonal factor is laid
-    // over it — two multipliers arguing with each other would make the worked
-    // example impossible to reproduce by hand.
-    const wobble = 1 + spec.jitter * Math.sin(day * 0.9);
-    series[day] = (weekly / 7) * wobble;
+/**
+ * The pinned soap ramp, solved against the bars that share its noodle.
+ *
+ * The hero's requirement is the sum of every soap bar's pull through the
+ * shared intermediate — that is the whole point of low-level-code sequencing.
+ * So the pinned ramp carries the *residual*: the build the worked example
+ * states, less what the others already draw. Set it beside them instead and
+ * the demo's first grid row is out by a sixth.
+ */
+function solveSoapRamp(rawByKey: Map<string, Float64Array>, fgs: Item[], plant: Plant, totalDays: number): void {
+  const pinned = rawByKey.get(`${CHAIN_FG.soap.itemId}@${PILOT_PLANT}`);
+  if (!pinned) return;
+
+  // Subtract what the others will actually *demand*, not their raw series. They
+  // still go through the closed-day carry on the way out, which moves a Sunday
+  // into the following week — so subtracting the raw shape leaves the hero's
+  // requirement out by a few tonnes a week, growing with the build.
+  const others = new Float64Array(totalDays);
+  for (const id of soapBarFgIds(fgs)) {
+    if (id === CHAIN_FG.soap.itemId) continue;
+    const series = rawByKey.get(`${id}@${PILOT_PLANT}`);
+    if (!series) continue;
+    const emitted = onWorkingDays(series, plant, totalDays);
+    for (let day = 0; day < totalDays; day += 1) {
+      others[day] = (others[day] as number) + Math.round(emitted[day] as number);
+    }
   }
-  return series;
+
+  for (let day = 0; day < totalDays; day += 1) {
+    pinned[day] = Math.max(0, (pinned[day] as number) - (others[day] as number));
+  }
 }
 
-/** A weekly plan spread evenly across its week, holding the last week onward. */
-function weeklySeries(totalDays: number, weekly: readonly number[]): Float64Array {
+/**
+ * A weekly plan spread across the working days of its own week.
+ *
+ * A week's demand stays in its week. The general path carries a closed day's
+ * quantity forward to the next open one, which is honest for a baseline and
+ * wrong here: a Sunday carried into Monday moves a seventh of the week across
+ * a bucket boundary, and the worked example stops footing by exactly that much.
+ */
+function spreadWeekly(weekly: readonly number[], plant: Plant, totalDays: number): Float64Array {
   const series = new Float64Array(totalDays);
   const last = weekly[weekly.length - 1] ?? 0;
-  for (let day = 0; day < totalDays; day += 1) {
-    const week = Math.floor(day / 7);
-    series[day] = (weekly[week] ?? last) / 7;
+  const calendar = SPEC.calendars.find((entry) => entry.id === plant.calendarId);
+  const working = new Set<number>(calendar?.workingDays ?? [1, 2, 3, 4, 5, 6]);
+  const holidays = new Set<string>(calendar?.holidays ?? []);
+
+  for (let week = 0; week * 7 < totalDays; week += 1) {
+    const open: number[] = [];
+    for (let day = week * 7; day < Math.min((week + 1) * 7, totalDays); day += 1) {
+      const epochDay = PLANNING_EPOCH + day;
+      const dow = (((epochDay + 4) % 7) + 7) % 7;
+      if (working.has(dow) && !holidays.has(fromEpochDay(epochDay))) open.push(day);
+    }
+    const total = Math.round(weekly[week] ?? last);
+    if (open.length === 0 || total <= 0) continue;
+    // Whole units, distributed so the week sums to its total exactly. An even
+    // split leaves a remainder that each day then rounds away, and a week that
+    // is two units short of its plan is a pallet short by the time the schedule
+    // builder has rounded the warehouse headroom down to fit.
+    const base = Math.floor(total / open.length);
+    const remainder = total - base * open.length;
+    open.forEach((day, index) => {
+      series[day] = base + (index < remainder ? 1 : 0);
+    });
   }
+
   return series;
 }
 
@@ -910,19 +1004,25 @@ function buildItemPlants(
 
   rows.push(heroItemPlant(HERO_RM, 'FOQ'), heroItemPlant(HERO_RM_TWIN, 'FOQ'), heroItemPlant(HERO_PM, 'POQ'));
 
-  // The made stages of the pinned chain.
+  // The made stages of the pinned chain, deliberately transparent.
   //
-  // Short lead times, lot-for-lot, and a buffer measured in days rather than
-  // weeks — which is what a soap plant actually runs, and which also keeps the
-  // chain nearly transparent. A bulk stage that batched fortnightly would put
-  // spikes into the hero's requirement that are an artefact of *its* lot size,
-  // not of demand, and the whole worked example would then be arguing with the
-  // wrong number.
+  // Lot-for-lot, no buffer, and no production offset, so what arrives at the
+  // bought materials below is the shape of demand and nothing else. A stage
+  // that batched fortnightly would put spikes into the hero's requirement that
+  // are an artefact of *its* lot size, and the worked example would then be
+  // arguing with the wrong number.
+  //
+  // The zero offset is the load-bearing part. Every intermediate day of
+  // production time shifts the requirement across a bucket boundary, and §15's
+  // correctness test is that a projected balance reconciles *exactly* to a
+  // hand-worked netting on the same inputs. None of these offsets is drawn on
+  // any screen; the ninety days that are, belong to the oil itself and are
+  // untouched.
   for (const stage of [
-    { itemId: CHAIN_FG.soap.itemId, leadTime: 2 },
-    { itemId: CHAIN_FG.refill.itemId, leadTime: 2 },
-    { itemId: CHAIN_ITEMS.noodle.itemId, leadTime: 3 },
-    { itemId: CHAIN_ITEMS.blend.itemId, leadTime: 2 },
+    { itemId: CHAIN_FG.soap.itemId, leadTime: 0 },
+    { itemId: CHAIN_FG.refill.itemId, leadTime: 0 },
+    { itemId: CHAIN_ITEMS.noodle.itemId, leadTime: 0 },
+    { itemId: CHAIN_ITEMS.blend.itemId, leadTime: 0 },
   ]) {
     rows.push({
       itemId: stage.itemId,
@@ -950,6 +1050,7 @@ function buildItemPlants(
       sourcePlantId: null,
       isPlanningRelevant: true,
       paramsLastChangedOn: '2025-04-08',
+      paramsLastChangedBy: 'Category planning',
       storageCapacity: null,
       dailyReceivingCapacity: null,
       maintainedStockDays: null,
@@ -1015,6 +1116,7 @@ function buildItemPlants(
         sourcePlantId: null,
         isPlanningRelevant: true,
         paramsLastChangedOn: fromEpochDay(PLANNING_EPOCH - rng.int(120, 1_100)),
+        paramsLastChangedBy: rng.pick(['Category planning', 'Sourcing', 'Plant stores', 'Master data']),
         storageCapacity: isBought ? Math.round(used.mean * rng.float(25, 70)) : null,
         dailyReceivingCapacity: isBought ? Math.round(used.mean * rng.float(3, 9)) : null,
         maintainedStockDays: isBought ? stockDays : null,
@@ -1029,6 +1131,19 @@ function buildItemPlants(
     }
   }
 
+  // `leadTimeDays` is the *complete* chain — release to available — so goods
+  // receipt and quality release belong inside it, exactly as the heroes carry
+  // them. Folded here rather than in the literal above so the random draws keep
+  // their order and the pack stays byte-identical everywhere else.
+  // The heroes are pinned from the PRD and already carry the whole chain — the
+  // calibration test asserts their six intervals sum to the maintained total —
+  // so they are skipped rather than folded a second time.
+  for (const row of rows) {
+    if (row.procurementType !== 'BUY' || row.leadTimeDays === null) continue;
+    if (pinnedKeys.has(`${row.itemId}@${row.plantId}`)) continue;
+    row.leadTimeDays += row.grProcessingTimeDays + row.qaQuarantineDays;
+  }
+
   // A block of domestic packaging maintained as though it behaved like an
   // import. The drift is real in the receipt history; nothing labels it.
   const byKey = new Map(rows.map((row) => [`${row.itemId}@${row.plantId}`, row]));
@@ -1039,6 +1154,7 @@ function buildItemPlants(
     row.maintainedStockDays = PACKAGING_DRIFT.maintainedLeadTimeDays;
     row.maintainedOrderDays = PACKAGING_DRIFT.maintainedLeadTimeDays;
     row.paramsLastChangedOn = '2023-06-19';
+    row.paramsLastChangedBy = 'Master data';
     PACKAGING_DRIFT_KEYS.add(key);
   }
 
@@ -1070,6 +1186,7 @@ function heroItemPlant(hero: HeroSpec, lotSizeRule: ItemPlant['lotSizeRule']): I
     sourcePlantId: null,
     isPlanningRelevant: true,
     paramsLastChangedOn: hero.paramsLastChangedOn,
+    paramsLastChangedBy: hero.paramsLastChangedBy,
     storageCapacity: hero.storageCapacity,
     dailyReceivingCapacity: hero.dailyReceivingCapacity,
     maintainedStockDays: hero.maintainedStockDays,
@@ -1168,17 +1285,18 @@ function pinnedStock(key: string): { unrestricted: number; quarantine?: Quaranti
 }
 
 /**
- * Made stages hold roughly a day of cover.
+ * The made stages of the pinned chain hold nothing.
  *
- * Enough that they are not stocked out on the morning of the run, little enough
- * that the requirement reaching the bought materials below is the shape of
- * demand rather than the shape of somebody's batch size.
+ * A day of cover at an intermediate absorbs the first day of demand and shifts
+ * everything below it, which is exactly the kind of quiet offset that stops the
+ * worked example footing. They are lot-for-lot with no buffer and no production
+ * offset, so demand passes through them unchanged — see `buildItemPlants`.
  */
 const CHAIN_STAGE_COVER_DAYS: Record<string, number> = {
-  [`${CHAIN_FG.soap.itemId}@${PILOT_PLANT}`]: 1,
-  [`${CHAIN_FG.refill.itemId}@${PILOT_PLANT}`]: 1,
-  [`${CHAIN_ITEMS.noodle.itemId}@${PILOT_PLANT}`]: 1,
-  [`${CHAIN_ITEMS.blend.itemId}@${PILOT_PLANT}`]: 1,
+  [`${CHAIN_FG.soap.itemId}@${PILOT_PLANT}`]: 0,
+  [`${CHAIN_FG.refill.itemId}@${PILOT_PLANT}`]: 0,
+  [`${CHAIN_ITEMS.noodle.itemId}@${PILOT_PLANT}`]: 0,
+  [`${CHAIN_ITEMS.blend.itemId}@${PILOT_PLANT}`]: 0,
 };
 
 // ---------------------------------------------------------------------------

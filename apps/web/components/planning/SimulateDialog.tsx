@@ -30,7 +30,21 @@ const FIELDS = [
   { field: 'minLotSize', label: 'Minimum order quantity', uom: null },
   { field: 'roundingValue', label: 'Rounding value', uom: null },
   { field: 'maxLotSize', label: 'Maximum lot', uom: null },
+  { field: 'periodsOfSupplyDays', label: 'Fixed period, days', uom: 'days' },
+  { field: 'grProcessingTimeDays', label: 'Goods receipt processing', uom: 'days' },
   { field: 'qaQuarantineDays', label: 'Quality inspection', uom: 'days' },
+  // Not master-data numbers. §7.7 asks for these by name, and a simulation
+  // that can only move a lead time can only rehearse one kind of argument.
+  { field: 'lotSizeRule', label: 'Lot-sizing policy', uom: null },
+  { field: 'demand', label: 'Demand in a week', uom: null },
+] as const;
+
+const LOT_RULES = [
+  { value: 'LFL', label: 'Lot for lot — order exactly what is needed' },
+  { value: 'FOQ', label: 'Fixed order quantity' },
+  { value: 'POQ', label: 'Fixed period — one order per campaign' },
+  { value: 'MINMAX', label: 'Min–max' },
+  { value: 'EOQ', label: 'Economic order quantity' },
 ] as const;
 
 export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
@@ -39,6 +53,10 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
   const [field, setField] = useState<string>('leadTimeDays');
   const [value, setValue] = useState<string>('');
   const [reasonCode, setReasonCode] = useState<string>('');
+  // Scoped, dated and expiring, which is what an override has to be to be
+  // auditable. Day offsets from the planning date: 0 is this run.
+  const [effectiveFromDay, setEffectiveFromDay] = useState('0');
+  const [expiresOnDay, setExpiresOnDay] = useState('');
   const [note, setNote] = useState('');
 
   const current = detail.parameters.find((row) => row.field === field);
@@ -47,14 +65,33 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
   const suggestion =
     field === 'leadTimeDays' && detail.fences.measured ? String(detail.fences.measured.totalDays) : null;
 
+  // Which week the demand change applies to. Weekly, because a planner argues
+  // about a week's requirement and never about a Tuesday's.
+  const weeks = detail.buckets.filter(
+    (bucket, index) => detail.buckets.findIndex((row) => row.week === bucket.week) === index,
+  );
+  const [demandWeek, setDemandWeek] = useState<string>(weeks[1]?.week ?? weeks[0]?.week ?? '');
+
+  const isPolicy = field === 'lotSizeRule';
+  const isDemand = field === 'demand';
+
   const parsed = value === '' ? null : Number(value);
-  const valid = value === '' || Number.isFinite(parsed);
+  const valid = value === '' || isPolicy || Number.isFinite(parsed);
 
   const simulation = useQuery({
-    queryKey: ['simulate', detail.itemId, detail.plantId, field, value],
+    queryKey: ['simulate', detail.itemId, detail.plantId, field, value, demandWeek],
     enabled: open && value !== '' && valid,
     queryFn: async (): Promise<SimulationView> => {
       const params = new URLSearchParams({ field, value });
+      if (isDemand) {
+        const days = detail.buckets.filter((bucket) => bucket.week === demandWeek);
+        const first = days[0];
+        const last = days[days.length - 1];
+        const planningDate = detail.header.planningDate;
+        const dayOf = (date: string): number => Math.round((Date.parse(date) - Date.parse(planningDate)) / 86_400_000);
+        params.set('fromDay', String(dayOf(first?.startDate ?? planningDate)));
+        params.set('toDay', String(dayOf(last?.endDate ?? planningDate)));
+      }
       const response = await fetch(
         `/api/material/${encodeURIComponent(detail.itemId)}/${encodeURIComponent(detail.plantId)}/simulate?${params}`,
       );
@@ -70,7 +107,14 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ field, value: parsed, reasonCode, note }),
+          body: JSON.stringify({
+            field,
+            value: parsed,
+            reasonCode,
+            note,
+            effectiveFromDay: Number(effectiveFromDay) || 0,
+            expiresOnDay: expiresOnDay === '' ? null : Number(expiresOnDay),
+          }),
         },
       );
       if (!response.ok) throw new Error((await response.json()).error ?? 'The override was not applied.');
@@ -124,22 +168,57 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
 
           <div className='flex items-end gap-3'>
             <div>
-              <span className='text-muted-foreground mb-1 block text-[12px]'>Maintained</span>
-              <p className='h-9 text-[15px] leading-9 font-medium tabular-nums'>{current?.maintained ?? '—'}</p>
+              <span className='text-muted-foreground mb-1 block text-[12px]'>
+                {isPolicy ? 'Today' : isDemand ? 'Week' : 'Maintained'}
+              </span>
+              {isDemand ? (
+                <select
+                  value={demandWeek}
+                  onChange={(event) => setDemandWeek(event.target.value)}
+                  className='border-input bg-background h-9 rounded-md border px-2 text-[13px]'
+                >
+                  {weeks.slice(0, 26).map((bucket) => (
+                    <option key={bucket.week} value={bucket.week}>
+                      {bucket.week}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <p className='h-9 text-[15px] leading-9 font-medium tabular-nums'>
+                  {isPolicy
+                    ? (detail.parameters.find((row) => row.field === 'lotSizeRule')?.maintained ?? '—')
+                    : (current?.maintained ?? '—')}
+                </p>
+              )}
             </div>
             <ArrowRight className='text-muted-foreground mb-2.5 size-4' />
             <label className='block flex-1'>
               <span className='text-muted-foreground mb-1 block text-[12px]'>Simulate at</span>
-              <input
-                value={value}
-                onChange={(event) => setValue(event.target.value)}
-                inputMode='decimal'
-                placeholder={current?.maintained ?? ''}
-                className={cn(
-                  'border-input bg-background h-9 w-full rounded-md border px-2 text-[13px] tabular-nums',
-                  !valid && 'border-status-critical',
-                )}
-              />
+              {isPolicy ? (
+                <select
+                  value={value}
+                  onChange={(event) => setValue(event.target.value)}
+                  className='border-input bg-background h-9 w-full rounded-md border px-2 text-[13px]'
+                >
+                  <option value=''>Choose a policy…</option>
+                  {LOT_RULES.map((rule) => (
+                    <option key={rule.value} value={rule.value}>
+                      {rule.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={value}
+                  onChange={(event) => setValue(event.target.value)}
+                  inputMode='decimal'
+                  placeholder={isDemand ? `${demandWeek} requirement` : (current?.maintained ?? '')}
+                  className={cn(
+                    'border-input bg-background h-9 w-full rounded-md border px-2 text-[13px] tabular-nums',
+                    !valid && 'border-status-critical',
+                  )}
+                />
+              )}
             </label>
             {suggestion ? (
               <Button variant='ghost' size='sm' className='mb-0.5 h-8 text-[12px]' onClick={() => setValue(suggestion)}>
@@ -147,6 +226,12 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
               </Button>
             ) : null}
           </div>
+          {isDemand ? (
+            <p className='text-muted-foreground mt-2 text-[11px] leading-snug'>
+              Demand is a simulation only — it is what the plan is being asked to cover, not a parameter this screen
+              maintains, so there is nothing here to override.
+            </p>
+          ) : null}
         </div>
 
         {simulation.data ? (
@@ -178,6 +263,10 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
                 </span>
               </div>
             ))}
+            {/* The payload has carried both curves since it was written and
+                nothing drew them. A table of deltas answers "how much"; the
+                chart is what answers "where". */}
+            <BeforeAfterChart data={simulation.data} />
             <p className='text-muted-foreground border-t px-4 py-2 text-[11px]'>
               Both sides are full planning runs, computed in {simulation.data.elapsedMs} ms. The fence moves from{' '}
               {simulation.data.beforeFence.earliestReceiptWeek} to {simulation.data.afterFence.earliestReceiptWeek}.
@@ -192,6 +281,34 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
         )}
 
         <div className='mt-4 border-t pt-4'>
+          <div className='mb-3 grid grid-cols-2 gap-3'>
+            <label className='block'>
+              <span className='text-muted-foreground mb-1 block text-[12px]'>Applies from (days from today)</span>
+              <input
+                value={effectiveFromDay}
+                onChange={(event) => setEffectiveFromDay(event.target.value)}
+                inputMode='numeric'
+                className='border-input bg-background h-9 w-full rounded-md border px-2 text-[13px] tabular-nums'
+              />
+            </label>
+            <label className='block'>
+              <span className='text-muted-foreground mb-1 block text-[12px]'>Expires after (blank = no end)</span>
+              <input
+                value={expiresOnDay}
+                onChange={(event) => setExpiresOnDay(event.target.value)}
+                inputMode='numeric'
+                placeholder='open-ended'
+                className='border-input bg-background h-9 w-full rounded-md border px-2 text-[13px] tabular-nums'
+              />
+            </label>
+          </div>
+          {Number(effectiveFromDay) > 0 ? (
+            <p className='text-muted-foreground mb-3 text-[11px] leading-snug'>
+              A run is a snapshot of one day, so an override that starts later is recorded and shown as pending — it
+              does not change this plan until its window opens.
+            </p>
+          ) : null}
+
           <div className='grid grid-cols-[220px_1fr] gap-3'>
             <label className='block'>
               <span className='text-muted-foreground mb-1 block text-[12px]'>Reason (required to override)</span>
@@ -227,7 +344,7 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
             <Button
               size='sm'
               className='h-8 shrink-0 text-[13px]'
-              disabled={!simulation.data || !reasonCode || commit.isPending}
+              disabled={!simulation.data || !reasonCode || commit.isPending || isDemand}
               onClick={() => commit.mutate()}
             >
               {commit.isPending ? 'Applying…' : 'Apply override'}
@@ -236,5 +353,85 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * The two balance curves, drawn against each other.
+ *
+ * Deliberately small and deliberately unlabelled beyond its ends: the question
+ * it answers is *where* the plan moved, not by how much — the table above
+ * already says that, and a second set of numbers here would compete with it.
+ */
+function BeforeAfterChart({ data }: { data: SimulationView }) {
+  const points = data.beforeBalance.length;
+  if (points < 2) return null;
+
+  const values = [...data.beforeBalance, ...data.afterBalance];
+  const top = Math.max(...values, 0);
+  const bottom = Math.min(...values, 0);
+  const span = top - bottom || 1;
+
+  const path = (series: number[]): string =>
+    series
+      .map((value, index) => {
+        const x = (index / (points - 1)) * 100;
+        const y = 100 - ((value - bottom) / span) * 100;
+        return `${index === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`;
+      })
+      .join(' ');
+
+  const zero = 100 - ((0 - bottom) / span) * 100;
+
+  return (
+    <div className='border-t px-4 py-3'>
+      <div className='mb-1.5 flex items-baseline justify-between'>
+        <span className='text-muted-foreground text-[11px] font-medium tracking-[0.03em] uppercase'>
+          Projected balance
+        </span>
+        <span className='text-muted-foreground text-[11px]'>
+          <span className='text-foreground'>——</span> now · <span className='text-primary'>——</span> simulated
+        </span>
+      </div>
+      <svg
+        viewBox='0 0 100 100'
+        preserveAspectRatio='none'
+        className='h-24 w-full'
+        role='img'
+        aria-label='Projected balance before and after the change'
+      >
+        {bottom < 0 ? (
+          <line
+            x1='0'
+            y1={zero}
+            x2='100'
+            y2={zero}
+            stroke='currentColor'
+            strokeWidth='0.4'
+            className='text-destructive/50'
+          />
+        ) : null}
+        <path
+          d={path(data.beforeBalance)}
+          fill='none'
+          stroke='currentColor'
+          strokeWidth='1'
+          vectorEffect='non-scaling-stroke'
+          className='text-muted-foreground'
+        />
+        <path
+          d={path(data.afterBalance)}
+          fill='none'
+          stroke='currentColor'
+          strokeWidth='1.5'
+          vectorEffect='non-scaling-stroke'
+          className='text-primary'
+        />
+      </svg>
+      <div className='text-muted-foreground mt-1 flex justify-between text-[10px]'>
+        <span>{data.bucketLabels[0]}</span>
+        <span>{data.bucketLabels[data.bucketLabels.length - 1]}</span>
+      </div>
+    </div>
   );
 }

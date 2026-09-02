@@ -21,11 +21,12 @@ import { cn } from '@repo/ui/lib/utils';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowLeft, Info } from 'lucide-react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import { useState } from 'react';
 
 import type { MaterialDetail } from '@/lib/api-types';
 import { ExplainDrawer } from '@/components/planning/ExplainDrawer';
+import type { GridAnchor } from '@/components/planning/PlanningGrid';
 import { PlanningGrid } from '@/components/planning/PlanningGrid';
 import { ProjectionChart } from '@/components/planning/ProjectionChart';
 import { SimulateDialog } from '@/components/planning/SimulateDialog';
@@ -37,7 +38,32 @@ export default function MaterialPage() {
   const plantId = decodeURIComponent(params.plantId);
 
   const [showDrift, setShowDrift] = useState(false);
-  const [explainOpen, setExplainOpen] = useState(false);
+
+  // Explain is meant to open from any number, and most numbers live on other
+  // screens. Rather than every screen carrying its own copy of the drawer and
+  // its own fetch of this material, they link here with the cell in the URL —
+  // one panel, one payload, and a link a planner can send to somebody else.
+  const search = useSearchParams();
+  const explainRow = search.get('explain');
+  const explainFrom = search.get('from');
+  const linkedAnchor: GridAnchor | null =
+    explainRow && explainFrom
+      ? {
+          row: explainRow,
+          fromDate: explainFrom,
+          toDate: search.get('to') ?? explainFrom,
+          label: `${explainRow}, ${explainFrom}`,
+        }
+      : null;
+
+  // The link opens the drawer; anything the planner does afterwards takes over.
+  // Derived rather than synchronised into state by an effect, which would
+  // re-open the panel every time the query changed underneath it.
+  const [chosen, setChosen] = useState<{ open: boolean; anchor: GridAnchor | null } | null>(null);
+  const explainOpen = chosen ? chosen.open : linkedAnchor !== null;
+  const anchor = chosen ? chosen.anchor : linkedAnchor;
+  const setExplainOpen = (open: boolean): void => setChosen({ open, anchor: open ? anchor : null });
+  const openExplain = (cell: GridAnchor | null): void => setChosen({ open: true, anchor: cell });
 
   const query = useQuery({
     queryKey: ['material', itemId, plantId],
@@ -126,14 +152,14 @@ export default function MaterialPage() {
         </div>
       </header>
 
-      <VerdictBar detail={detail} onExplain={() => setExplainOpen(true)} />
+      <VerdictBar detail={detail} onExplain={() => openExplain(null)} />
 
       <div className='mt-5'>
         <ProjectionChart detail={detail} showDrift={showDrift} />
       </div>
 
       <div className='mt-5'>
-        <PlanningGrid detail={detail} onExplain={() => setExplainOpen(true)} />
+        <PlanningGrid detail={detail} onExplain={(cell) => openExplain(cell ?? null)} />
       </div>
 
       <div className='mt-5 grid grid-cols-1 gap-5 xl:grid-cols-3'>
@@ -181,7 +207,7 @@ export default function MaterialPage() {
         </section>
       ) : null}
 
-      <ExplainDrawer detail={detail} open={explainOpen} onOpenChange={setExplainOpen} />
+      <ExplainDrawer detail={detail} open={explainOpen} onOpenChange={setExplainOpen} anchor={anchor} />
     </Shell>
   );
 }

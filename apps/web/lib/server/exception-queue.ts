@@ -46,17 +46,23 @@ export function exceptionQueue(scenarioId: string, filters: ExceptionFilters = {
   const visible = filters.includeDismissed ? all : all.filter((row) => !row.dismissed);
 
   const groups = GROUP_ORDER.map((group) => {
+    // The engine's own ranking — time to breach, severity, value, cover at risk,
+    // and reachability as a multiplier — rather than a re-sort on two of those
+    // five. Re-sorting here is what put a master-data gap, which has nothing
+    // quantified against it, permanently at the bottom of its own group.
     const exceptions = visible
       .filter((row) => row.group === group)
-      .sort((a, b) => a.daysToBite - b.daysToBite || b.valueAtStake - a.valueAtStake);
+      .sort((a, b) => b.score - a.score || a.daysToBite - b.daysToBite);
 
+    const shown = exceptions.slice(0, filters.limitPerGroup ?? 25);
     return {
       group,
       label: ACTION_GROUP_LABEL[group],
       note: ACTION_GROUP_NOTE[group],
       count: exceptions.length,
       valueAtStake: exceptions.reduce((sum, row) => sum + row.valueAtStake, 0),
-      exceptions: exceptions.slice(0, filters.limitPerGroup ?? 25),
+      exceptions: shown,
+      shown: shown.length,
     };
   }).filter((row) => row.count > 0 && (!filters.group || row.group === filters.group));
 

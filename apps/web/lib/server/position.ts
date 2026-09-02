@@ -15,6 +15,7 @@
 
 import { CHANGE_CAUSE_LABEL } from '@repo/data-packs';
 import { fromEpochDay, planKey, TIERS, weekLabel } from '@repo/domain';
+import { EXCESS_MULTIPLE } from '@repo/planning-engine';
 
 import type { DriftRow, PlanningPosition, PositionRow, PositionTile, TierView } from '../api-types';
 import { contextFor, runContext, type MaterialFacts, type RunContext } from './context';
@@ -53,8 +54,12 @@ export function planningPosition(scenarioId: string, filters: PositionFilters = 
     return true;
   });
 
-  const rows = scoped.map((facts) => toRow(facts, context));
-  const tiles = buildTiles(rows, scoped, context);
+  const rows = scoped.map((facts) => {
+    const row = toRow(facts, context);
+    row.tiles = tilesFor(facts, row, context);
+    return row;
+  });
+  const tiles = buildTiles(rows);
 
   const filtered = filters.tile ? rows.filter((row) => matchesTile(row, filters.tile as PositionTile['key'])) : rows;
 
@@ -123,9 +128,8 @@ function toRow(facts: MaterialFacts, context: RunContext): PositionRow {
     status,
     statusLabel: STATUS_LABEL[status],
     reachableByOrdering: reachable,
-    // `itemPlant` is read for the excess test above; keeping the reference
-    // explicit stops a future edit from dropping the only use of it.
-    ...(itemPlant.maxNormDays === null ? {} : {}),
+    maxNormDays: itemPlant.maxNormDays,
+    tiles: [],
   };
 }
 
@@ -137,9 +141,64 @@ const STATUS_LABEL: Record<PositionRow['status'], string> = {
   OK: 'Covered',
 };
 
+/**
+ * Excess **or expiry**, which is what the tile has always claimed to count.
+ *
+ * It only ever tested the first: a material with no maximum norm maintained
+ * returned `false` on the first line, whatever its batches were dated to do —
+ * while the exception engine, reading the same snapshot, raised it. Two screens
+ * disagreeing about one material is worse than neither showing it.
+ */
 function isExcess(facts: MaterialFacts): boolean {
-  if (facts.itemPlant.maxNormDays === null) return false;
-  return facts.daysOfCoverToday > facts.itemPlant.maxNormDays * 1.1;
+  const overNorm =
+    facts.itemPlant.maxNormDays !== null && facts.daysOfCoverToday > facts.itemPlant.maxNormDays * EXCESS_MULTIPLE;
+  if (overNorm) return true;
+
+  const shelfLife = facts.shelfLifeDays;
+  if (shelfLife !== null && facts.daysOfCoverToday > shelfLife * 0.75) return true;
+
+  // A batch dated to die is a write-off whatever the forward cover says.
+  const horizon = (shelfLife ?? 90) * 0.25;
+  return facts.expiringBatches.some((batch) => batch.qty > 0 && batch.daysToExpiry <= horizon);
+}
+
+/**
+ * Which tiles a row belongs to, decided once.
+ *
+ * The tiles used to count one condition and filter on another — `UNREACHABLE`
+ * counted materials with a past-release order and filtered on a status that
+ * excluded any of them that had also stocked out; `UNCONFIRMED` counted a
+ * balance property and filtered on an attribute of the next receipt, which
+ * share no operands at all. Clicking a tile showed a list whose length was not
+ * the number on the tile, in both directions.
+ *
+ * So membership is computed here, per row, and both the count and the
+ * drill-down read it.
+ */
+function tilesFor(facts: MaterialFacts, row: PositionRow, context: RunContext): PositionTile['key'][] {
+  const keys: PositionTile['key'][] = ['PLANNED'];
+
+  if (row.status === 'STOCK_OUT') keys.push('STOCKOUTS');
+  if (row.status === 'BREACH' || row.status === 'UNREACHABLE') keys.push('BREACHES');
+
+  const unreachableOrders = (context.plan.orderExplanations.get(planKey(facts.itemId, facts.plantId)) ?? []).some(
+    (order) => order.isReleaseInPast,
+  );
+  if (unreachableOrders) keys.push('UNREACHABLE');
+
+  // A *critical* week held up by supply nobody has acknowledged: without those
+  // lines the material does not merely dip into its buffer, it runs out.
+  for (let day = 0; day <= CRITICAL_WINDOW_DAYS; day += 1) {
+    const confirmedOnly = facts.plan.projectedConfirmedOnly[day] as number;
+    const withCommitted = facts.plan.projectedBeforePlanned[day] as number;
+    if (confirmedOnly < 0 && withCommitted >= 0) {
+      keys.push('UNCONFIRMED');
+      break;
+    }
+  }
+
+  if (isExcess(facts)) keys.push('EXCESS');
+  return keys;
 }
 
 /**
@@ -167,34 +226,14 @@ export function tierView(tier: 1 | 2 | 3): TierView {
   return { tier: meta.tier, label: meta.label, fill: meta.fill };
 }
 
-function buildTiles(rows: PositionRow[], facts: MaterialFacts[], context: RunContext): PositionTile[] {
-  const stockouts = rows.filter((row) => row.status === 'STOCK_OUT').length;
-  const breaches = rows.filter((row) => row.status === 'BREACH' || row.status === 'UNREACHABLE').length;
-  const unreachable = facts.filter((row) =>
-    (context.plan.orderExplanations.get(planKey(row.itemId, row.plantId)) ?? []).some((order) => order.isReleaseInPast),
-  ).length;
+function buildTiles(rows: PositionRow[]): PositionTile[] {
+  const count = (key: PositionTile['key']): number => rows.filter((row) => row.tiles.includes(key)).length;
 
-  // A *critical* week held up by supply nobody has acknowledged. Counted by
-  // comparing the balance on acknowledged supply against the balance on
-  // everything ordered — the difference is exactly the rosy picture.
-  //
-  // Scoped to the near horizon on purpose. Far out, almost every material
-  // depends on something unacknowledged, and a tile that counts those is a
-  // tile that counts the whole book.
-  const unconfirmed = facts.filter((row) => {
-    for (let day = 0; day <= CRITICAL_WINDOW_DAYS; day += 1) {
-      const confirmedOnly = row.plan.projectedConfirmedOnly[day] as number;
-      const withCommitted = row.plan.projectedBeforePlanned[day] as number;
-      // Deliberately the sharp test: without the lines nobody has
-      // acknowledged, this material does not merely dip into its buffer — it
-      // runs out. A softer threshold counts most of the book, and a tile that
-      // counts most of the book is a tile nobody clicks.
-      if (confirmedOnly < 0 && withCommitted >= 0) return true;
-    }
-    return false;
-  }).length;
-
-  const excess = rows.filter((row) => row.status === 'EXCESS').length;
+  const stockouts = count('STOCKOUTS');
+  const breaches = count('BREACHES');
+  const unreachable = count('UNREACHABLE');
+  const unconfirmed = count('UNCONFIRMED');
+  const excess = count('EXCESS');
 
   return [
     { key: 'PLANNED', label: 'Materials planned', count: rows.length, note: 'In this run, at the selected plants.' },
@@ -231,21 +270,9 @@ function buildTiles(rows: PositionRow[], facts: MaterialFacts[], context: RunCon
   ];
 }
 
+/** The same membership the tile was counted from. One source, by construction. */
 function matchesTile(row: PositionRow, tile: PositionTile['key']): boolean {
-  switch (tile) {
-    case 'STOCKOUTS':
-      return row.status === 'STOCK_OUT';
-    case 'BREACHES':
-      return row.status === 'BREACH' || row.status === 'UNREACHABLE';
-    case 'UNREACHABLE':
-      return row.status === 'UNREACHABLE' || !row.reachableByOrdering;
-    case 'UNCONFIRMED':
-      return row.nextReceipt?.tier.tier === 2;
-    case 'EXCESS':
-      return row.status === 'EXCESS';
-    default:
-      return true;
-  }
+  return row.tiles.includes(tile);
 }
 
 /**

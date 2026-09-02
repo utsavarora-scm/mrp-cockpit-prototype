@@ -83,6 +83,7 @@ export {
 export {
   computeFences,
   leadTimeChain,
+  alternateLeadTimeChain,
   zoneOfDay,
   unreachableByDays,
   REVIEW_CYCLE_DAYS,
@@ -102,14 +103,19 @@ export {
   type DeliveryScheduleInput,
   type DeliveryScheduleResult,
   type IdealLine,
+  type PlannerLine,
+  type ProposedCorrection,
   type ResidualExposure,
+  type ScheduleAdvisory,
   type ScheduleDelta,
+  type ScheduleViolation,
 } from './delivery-schedule';
 export {
   raiseExceptions,
   rankExceptions,
   ACTION_GROUP_LABEL,
   ACTION_GROUP_NOTE,
+  EXCESS_MULTIPLE,
   LEAD_TIME_DRIFT_THRESHOLD,
   type ActionGroup,
   type CategorySibling,

@@ -28,28 +28,41 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 
 import type { ChainStep, ExplainLine, ExplainPayload, MaterialDetail } from '@/lib/api-types';
+import type { GridAnchor } from './PlanningGrid';
 
 export function ExplainDrawer({
   detail,
   trigger,
   open,
   onOpenChange,
+  anchor,
 }: {
   detail: MaterialDetail;
   trigger?: React.ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** The cell this was opened from, where it was opened from one. */
+  anchor?: GridAnchor | null;
 }) {
   const [internalOpen, setInternalOpen] = useState(false);
   const isOpen = open ?? internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
 
   const query = useQuery({
-    queryKey: ['explain', detail.itemId, detail.plantId],
+    // The anchor is part of the identity: two cells on the same material are
+    // two different explanations, and a key that cannot tell them apart serves
+    // the first one it cached for both.
+    queryKey: ['explain', detail.itemId, detail.plantId, anchor?.row ?? null, anchor?.fromDate ?? null],
     enabled: isOpen,
     queryFn: async (): Promise<ExplainPayload> => {
+      const params = new URLSearchParams();
+      if (anchor) {
+        params.set('row', anchor.row);
+        params.set('from', anchor.fromDate);
+        params.set('to', anchor.toDate);
+      }
       const response = await fetch(
-        `/api/material/${encodeURIComponent(detail.itemId)}/${encodeURIComponent(detail.plantId)}/explain`,
+        `/api/material/${encodeURIComponent(detail.itemId)}/${encodeURIComponent(detail.plantId)}/explain?${params.toString()}`,
       );
       if (!response.ok) throw new Error('That could not be explained.');
       return response.json();
@@ -65,6 +78,7 @@ export function ExplainDrawer({
             {detail.itemId} · {detail.description}
           </SheetTitle>
           <p className='text-muted-foreground text-[12px]'>
+            {anchor ? `${anchor.label} · ` : ''}
             {detail.plantId} · every operand below traces to a source field in at most four steps
           </p>
         </SheetHeader>
@@ -248,6 +262,7 @@ function Body({ payload, detail }: { payload: ExplainPayload; detail: MaterialDe
                   )}
                 >
                   {row.lastChangedOn}
+                  {row.changedBy ? ` · ${row.changedBy}` : ''}
                   {row.ageDays > 365 ? ` · ${Math.round(row.ageDays / 365)}y ago` : ''}
                 </td>
               </tr>
