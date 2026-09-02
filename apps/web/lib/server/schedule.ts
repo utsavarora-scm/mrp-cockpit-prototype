@@ -73,6 +73,7 @@ export function scheduleBuilder(
   const plannerLines = builderEditsFor(itemId, plantId).map((edit) => ({ line: edit.line, qty: edit.qty }));
 
   const result = buildDeliverySchedule({
+    baseUom: facts.baseUom,
     plannerLines,
     itemId,
     plantId,

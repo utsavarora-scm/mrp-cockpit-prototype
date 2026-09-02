@@ -51,14 +51,15 @@ export function DeliveryLedger({
         </div>
 
         <div className='overflow-x-auto'>
-          <table className='w-full min-w-[900px]'>
+          <table className='w-full min-w-[1000px]'>
             <thead>
               <tr className='bg-surface-sunken border-b'>
                 <Th>Line</Th>
                 <Th>Delivery</Th>
                 <Th>Dispatch by</Th>
-                <Th align='right'>Requirement</Th>
-                <Th align='right'>Ideal</Th>
+                <Th align='right'>Gross demand</Th>
+                <Th align='right'>Net replenishment need</Th>
+                <Th align='right'>Ideal call-off</Th>
                 <Th align='right'>Committed</Th>
                 <Th align='right'>Δ</Th>
                 <Th align='right'>Balance after</Th>
@@ -80,7 +81,7 @@ export function DeliveryLedger({
                 />
               ))}
               <tr className='bg-surface-sunken font-medium'>
-                <td className='grid-cell' colSpan={4}>
+                <td className='grid-cell' colSpan={5}>
                   Total
                 </td>
                 <td className='grid-cell num'>{formatNumber(view.totals.ideal)}</td>
@@ -287,6 +288,13 @@ function ScheduleRow({
           {formatNumber(line.requirement)}
         </Link>
       </td>
+      {/* The base the +N is measured against, which only ever lived in a
+          tooltip. Gross demand is the week's requirement; this is what the
+          position still needs once the balance carried in and the buffer are
+          taken into account — and ideal less this is the lot-sizing addition.
+          Without it on the row, 204 beside 400 +349 is arithmetic nobody can
+          follow. */}
+      <td className='text-muted-foreground grid-cell num'>{formatNumber(line.needQty)}</td>
       <td className='grid-cell num'>
         {formatNumber(line.idealQty)}
         {line.lotSizingAddition > 0 ? (
@@ -297,8 +305,8 @@ function ScheduleRow({
               </span>
             </TooltipTrigger>
             <TooltipContent className='max-w-[280px]'>
-              {formatNumber(line.needQty)} is requirement; {formatNumber(line.lotSizingAddition)} was added by a
-              lot-sizing rule. Need and rule are never merged.
+              {formatNumber(line.needQty)} is the net replenishment need; {formatNumber(line.lotSizingAddition)} was
+              added by a lot-sizing rule. Need and rule are never merged.
             </TooltipContent>
           </Tooltip>
         ) : null}

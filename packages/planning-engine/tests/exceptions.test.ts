@@ -103,6 +103,7 @@ function order(overrides: Partial<PlannedOrderExplanation> = {}): PlannedOrderEx
     requirementDay: 20,
     receiptDate: '2026-09-20',
     releaseDate: '2026-06-20',
+    releaseDay: -72,
     isReleaseInPast: true,
     effectiveLeadTimeDays: 30,
     totalOffsetDays: 30,

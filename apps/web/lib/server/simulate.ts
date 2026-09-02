@@ -26,7 +26,7 @@ export const SIMULATABLE_FIELDS: Record<string, string> = {
   minLotSize: 'Minimum order quantity',
   roundingValue: 'Rounding value',
   maxLotSize: 'Maximum lot',
-  periodsOfSupplyDays: 'Fixed period, days',
+  periodsOfSupplyDays: 'Period of supply, days',
   grProcessingTimeDays: 'Goods receipt processing, days',
   qaQuarantineDays: 'Quality inspection, days',
 };

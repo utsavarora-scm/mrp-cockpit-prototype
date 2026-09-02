@@ -316,6 +316,7 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
           requirementDay: draft.receiptDay,
           receiptDate: fromEpochDay(draft.receiptEpochDay),
           releaseDate: fromEpochDay(draft.releaseEpochDay),
+          releaseDay: draft.releaseDay,
           isReleaseInPast: draft.isReleaseInPast,
           effectiveLeadTimeDays: draft.effectiveLeadTimeDays,
           totalOffsetDays: draft.totalOffsetDays,

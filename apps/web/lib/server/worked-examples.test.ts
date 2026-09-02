@@ -166,7 +166,11 @@ describe('hero A — RM-30114, the grid the demo reads row by row', () => {
     for (const cell of annotations) {
       expect(cell.releaseWeek).toBe('W26');
       expect(cell.tone).toBe('PAST');
-      expect(cell.weeksLate).toBeGreaterThanOrEqual(9);
+      // Asserted as the exact release date and an elapsed-day count, not a
+      // rounded week: 65 days is 9.3 weeks while W26 against W36 is ten
+      // planning weeks, and rounding either way contradicts the other.
+      expect(cell.releaseDate).toBe('2026-06-27');
+      expect(cell.daysLate).toBe(65);
     }
   });
 
@@ -177,8 +181,11 @@ describe('hero A — RM-30114, the grid the demo reads row by row', () => {
     expect(recommendation.qty).toBe(1_000);
     expect(recommendation.receiptWeek).toBe('W39');
     expect(recommendation.releaseWeek).toBe('W26');
+    expect(recommendation.releaseDate).toBe('2026-06-27');
     expect(recommendation.isReleaseInPast).toBe(true);
-    expect(recommendation.weeksLate).toBeGreaterThanOrEqual(9);
+    // 2026-06-27 to the 2026-08-31 planning date. Stated in days because the
+    // two week labels beside it measure something else.
+    expect(recommendation.daysLate).toBe(65);
     expect(recommendation.leadTimeDays).toBe(HERO_RM.maintainedLeadTimeDays);
   });
 

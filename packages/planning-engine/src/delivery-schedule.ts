@@ -226,6 +226,8 @@ export interface DeliveryScheduleInput {
   safetyStock: number;
   /** Mean daily consumption, for stating a shortfall in days rather than units. */
   dailyDemandMean: number;
+  /** The material's base unit, so the ledger's sentences can carry it. */
+  baseUom: string;
 
   moq: number | null;
   roundingValue: number | null;
@@ -1298,13 +1300,19 @@ function buildLedger(
   } else {
     const added = lotSizing.reduce((sum, line) => sum + line.lotSizingAddition, 0);
     entries.push(
-      `${format(added)} of the schedule is lot sizing rather than requirement, across ${lotSizing.length} ${lotSizing.length === 1 ? 'line' : 'lines'}. That quantity is need created by a rule, not by demand.`
+      `${format(added)} ${input.baseUom} of the schedule is lot sizing rather than requirement, across ${lotSizing.length} ${lotSizing.length === 1 ? 'line' : 'lines'}. That quantity is need created by a rule, not by demand.`
     );
   }
 
   const unreachable = committed.filter((line) => line.insideFence);
   if (unreachable.length > 0) {
-    const worst = unreachable.reduce((max, line) => Math.max(max, line.unreachableByDays), 0);
+    // The *first* line's gap, because that is what the sentence claims. It
+    // happens to be the largest — the gap shrinks as the delivery date grows —
+    // but agreeing by accident of ordering is not the same as agreeing.
+    const worst = unreachable.reduce(
+      (earliest, line) => (line.deliveryDay < earliest.deliveryDay ? line : earliest),
+      unreachable[0] as CommittedLine
+    ).unreachableByDays;
     entries.push(
       `${unreachable.length} ${unreachable.length === 1 ? 'line is' : 'lines are'} required before a newly placed order could arrive — the first by ${worst} days. Those cannot be closed by ordering.`
     );

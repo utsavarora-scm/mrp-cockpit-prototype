@@ -241,6 +241,15 @@ export interface PlannedOrderExplanation {
   requirementDay: number;
   receiptDate: string;
   releaseDate: string;
+  /**
+   * Day offset of the release from the planning date. Negative means the past.
+   *
+   * Carried rather than re-derived as `requirementDay − totalOffsetDays`: that
+   * subtraction ignores the working-calendar snap the walk actually applied,
+   * and `requirementDay` is the *receipt* day, so the two disagreed by up to a
+   * week on exactly the orders whose lateness is the point.
+   */
+  releaseDay: number;
   /** True when the release date has already passed — the order is unorderable. */
   isReleaseInPast: boolean;
   /** Lead time the run actually used: maintained, or observed under that scenario. */

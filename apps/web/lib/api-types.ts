@@ -182,7 +182,14 @@ export interface GridCell {
   releaseWeek: string;
   releaseDate: string;
   /** How many weeks the release date has already passed by. Zero when it has not. */
-  weeksLate: number;
+  /**
+   * Days between the release date and today.
+   *
+   * Days rather than weeks: 65 elapsed days is 9.3 weeks while the labels it
+   * sits beside read W26 and W36, ten planning weeks apart. Rounding either
+   * way produced a number that contradicted the weeks printed next to it.
+   */
+  daysLate: number;
   qty: number;
 }
 
@@ -193,6 +200,16 @@ export interface GridRow {
   /** Sub-rows are indented under the row they decompose. */
   indent: 0 | 1;
   values: number[];
+  /**
+   * The lowest value reached inside each bucket, where it differs from the close.
+   *
+   * A weekly cell shows the balance the period *ends* on, but netting acts on
+   * the worst point inside it. W36 printed 285 against a 132 safety stock while
+   * the run was netting a shortfall at 131 on the Monday, so the grid appeared
+   * to contradict its own net-requirement row. Null on rows where the two agree,
+   * and on flow rows, which have no trough.
+   */
+  trough?: Array<number | null>;
   /** How the row collapses when days are bucketed into weeks. */
   aggregate: 'SUM' | 'LAST';
   emphasis: 'BALANCE' | 'THRESHOLD' | 'ANSWER' | 'NONE';
@@ -304,7 +321,14 @@ export interface RecommendationView {
   releaseWeek: string;
   isReleaseInPast: boolean;
   /** How many weeks the release date has already passed by. */
-  weeksLate: number;
+  /**
+   * Days between the release date and today.
+   *
+   * Days rather than weeks: 65 elapsed days is 9.3 weeks while the labels it
+   * sits beside read W26 and W36, ten planning weeks apart. Rounding either
+   * way produced a number that contradicted the weeks printed next to it.
+   */
+  daysLate: number;
   leadTimeDays: number;
 }
 

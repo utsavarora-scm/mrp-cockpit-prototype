@@ -46,6 +46,7 @@ function bottleCampaign(overrides: Partial<DeliveryScheduleInput> = {}): Deliver
     grossRequirements: requirements,
     openingBalance: 260_000,
     safetyStock: 100_000,
+    baseUom: 'MT',
     dailyDemandMean: 30_000,
     moq: 100_000,
     roundingValue: 10_000,

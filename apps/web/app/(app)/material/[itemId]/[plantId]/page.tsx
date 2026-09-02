@@ -243,8 +243,9 @@ function VerdictBar({ detail, onExplain }: { detail: MaterialDetail; onExplain: 
             ) : null}
             {recommendation.isReleaseInPast ? (
               <span className='text-status-critical font-medium'>
-                It needed releasing {recommendation.releaseWeek} — {recommendation.weeksLate}{' '}
-                {recommendation.weeksLate === 1 ? 'week' : 'weeks'} ago. It cannot now be placed in time.
+                It needed releasing {recommendation.releaseWeek} ({recommendation.releaseDate}) —{' '}
+                {recommendation.daysLate} {recommendation.daysLate === 1 ? 'day' : 'days'} ago. It cannot now be placed
+                in time.
               </span>
             ) : (
               <span>

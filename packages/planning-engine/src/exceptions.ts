@@ -213,6 +213,14 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
   const emit = (
     partial: Omit<PlanningException, 'id' | 'score' | 'valueAtStake' | 'itemId' | 'plantId' | 'daysAtStake'> & {
       daysAtStake?: number;
+      /**
+       * Distinguishes conditions sharing a code.
+       *
+       * The three `EXCESS_RISK` variants keyed on the same id whenever their
+       * bite days collided — an expiry within a day of the norm check — and
+       * dismissals are stored by id, so dismissing one hid the other.
+       */
+      variant?: string;
     }
   ): void => {
     const daysAtStake =
@@ -220,7 +228,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
     const exception: PlanningException = {
       ...partial,
       daysAtStake,
-      id: `${partial.code}-${context.itemId}-${context.plantId}-${partial.biteDay}`,
+      id: `${partial.code}-${partial.variant ?? ''}-${context.itemId}-${context.plantId}-${partial.biteDay}`,
       itemId: context.itemId,
       plantId: context.plantId,
       valueAtStake: partial.qtyAtStake * context.standardCost,
@@ -375,12 +383,18 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
     const shortfall = [...shortfallByRequirement.values()].reduce((sum, qty) => sum + qty, 0);
     const requirementCount = shortfallByRequirement.size;
 
-    const weeksLate = Math.round((0 - dayOffsetOfRelease(first)) / 7);
+    // Days, and the two week labels — not a rounded week count.
+    //
+    // "9 weeks ago" sat above its own W26-against-W36 labels and looked wrong,
+    // because those are two different measures: 65 elapsed days is 9.3 weeks,
+    // while 10 is the difference between the planning weeks. Saying how many
+    // days, and naming both weeks, is unambiguous in a way neither rounding is.
+    const daysLate = Math.max(0, -first.releaseDay);
     emit({
       code: 'UNREACHABLE_REQUIREMENT',
       group: 'CANNOT_ORDER',
       severity: 'CRITICAL',
-      headline: `${requirementCount} ${requirementCount === 1 ? 'requirement' : 'requirements'} for ${context.description} needed ordering before today — the first ${weeksLate} ${weeksLate === 1 ? 'week' : 'weeks'} ago. ${round(shortfall)} ${context.baseUom} of genuine shortfall, against ${round(totalQty)} ${context.baseUom} that would be raised. No purchase order placed now can reach ${requirementCount === 1 ? 'it' : 'them'}.`,
+      headline: `${requirementCount} ${requirementCount === 1 ? 'requirement' : 'requirements'} for ${context.description} needed ordering before today — the first ${daysLate} ${daysLate === 1 ? 'day' : 'days'} ago, on ${first.releaseDate}. ${round(shortfall)} ${context.baseUom} of genuine shortfall, against ${round(totalQty)} ${context.baseUom} that would be raised. No purchase order placed now can reach ${requirementCount === 1 ? 'it' : 'them'}.`,
       biteDay: first.requirementDay,
       qtyAtStake: shortfall,
       reachableByOrdering: false,
@@ -622,6 +636,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
     const excessQty = (closingCover - context.maxNormDays) * context.dailyDemandMean;
     emit({
       code: 'EXCESS_RISK',
+      variant: 'NORM',
       group: 'REDUCE_COVER',
       severity: 'LOW',
       headline: `${context.description} holds ${Math.round(closingCover)} days of cover against a maximum norm of ${context.maxNormDays}.`,
@@ -643,6 +658,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
   if (context.shelfLifeDays !== null && closingCover > context.shelfLifeDays * 0.75) {
     emit({
       code: 'EXCESS_RISK',
+      variant: 'SHELF_LIFE',
       group: 'REDUCE_COVER',
       severity: 'MEDIUM',
       headline: `${context.description} holds ${Math.round(closingCover)} days of cover against a ${context.shelfLifeDays}-day shelf life.`,
@@ -669,6 +685,7 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
     const soonest = expiring.reduce((min, batch) => Math.min(min, batch.daysToExpiry), Number.POSITIVE_INFINITY);
     emit({
       code: 'EXCESS_RISK',
+      variant: 'EXPIRY',
       group: 'REDUCE_COVER',
       severity: soonest <= 30 ? 'HIGH' : 'MEDIUM',
       headline: `${round(qty)} ${context.baseUom} of ${context.description} expires within ${Math.round(soonest)} days, across ${expiring.length} batch${expiring.length === 1 ? '' : 'es'}.`,
@@ -886,13 +903,6 @@ function coverAt(balance: number, grossRequirements: Float64Array, fromDay: numb
     remaining -= demand;
   }
   return horizonDays - fromDay;
-}
-
-function dayOffsetOfRelease(order: PlannedOrderExplanation): number {
-  // The explanation carries the receipt day and the total offset that produced
-  // the release date, so the release day is recoverable without a second date
-  // parse — and it stays consistent with whatever the run actually used.
-  return order.requirementDay - order.totalOffsetDays;
 }
 
 /**

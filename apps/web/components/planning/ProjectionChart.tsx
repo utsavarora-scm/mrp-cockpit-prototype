@@ -207,6 +207,23 @@ export function ProjectionChart({ detail, showDrift }: Props) {
               dot={false}
               isAnimationActive={false}
             />
+            {/* The curve the stock-out exception actually quotes.
+             *
+             * It was computed and shipped all along and drawn on nothing, so a
+             * headline reading "the balance reaches -264 MT at its worst, even
+             * after every order that can still be placed" cited a number the
+             * planner could not find on any screen — sitting beside a row
+             * labelled "after planned orders" that sounds like the same thing
+             * and counts the unplaceable orders too. */}
+            <Line
+              type='stepAfter'
+              dataKey='balanceAfterPlaceable'
+              stroke='var(--chart-3)'
+              strokeWidth={1.5}
+              strokeDasharray='6 2 1 2'
+              dot={false}
+              isAnimationActive={false}
+            />
             <Line
               type='stepAfter'
               dataKey='balanceBeforePlanned'
@@ -329,6 +346,19 @@ function Legend({ detail, showDrift }: { detail: MaterialDetail; showDrift: bool
         }
       >
         after planned orders
+      </Key>
+      <Key
+        swatch={
+          <span
+            className='h-0.5 w-4 rounded-full'
+            style={{
+              backgroundImage:
+                'repeating-linear-gradient(90deg, var(--chart-3) 0 6px, transparent 6px 8px, var(--chart-3) 8px 9px, transparent 9px 11px)',
+            }}
+          />
+        }
+      >
+        after orders that can still be placed
       </Key>
       {showDrift ? (
         <Key

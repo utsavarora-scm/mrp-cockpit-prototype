@@ -176,11 +176,21 @@ function Row({
 
       {buckets.map((bucket, position) => {
         const value = row.values[position] ?? 0;
+        // The worst point inside the week, where it is not the closing one.
+        //
+        // Netting acts on the trough; the cell shows the close. W36 read 285
+        // above a 132 safety stock while the run was netting a shortfall at 131
+        // on the Monday, so the grid looked like it disagreed with its own net
+        // requirement row. Both are shown, the close in its usual place.
+        const trough = row.trough?.[position] ?? null;
         // A balance below safety stock is a breach on either balance row, not
         // only on the honest one — the row that shows the plan's own answer has
-        // to admit when the answer still leaves the buffer broken.
+        // to admit when the answer still leaves the buffer broken. Judged on the
+        // trough where there is one: a week that dips under the buffer and
+        // recovers by Friday still dipped under the buffer.
         const isBalance = row.tone === 'NEGATIVE_IS_BAD';
-        const bad = isBalance && (value < 0 || value < bucket.safetyStock);
+        const worst = trough ?? value;
+        const bad = isBalance && (worst < 0 || worst < bucket.safetyStock);
         const annotations = row.cells?.[position] ?? [];
 
         // Every cell opens its own explanation. The claim was in this file's
@@ -230,6 +240,11 @@ function Row({
               )}
             >
               {value === 0 ? '—' : formatNumber(value)}
+              {trough !== null ? (
+                <span className='text-muted-foreground block text-[10px] leading-tight font-normal'>
+                  worst {formatNumber(trough)}
+                </span>
+              ) : null}
             </button>
           </td>
         );
@@ -266,7 +281,7 @@ function ReleaseCells({ cells, uom }: { cells: GridCell[]; uom: string }) {
           <TooltipContent className='max-w-[300px]'>
             {formatNumber(cell.qty)} {uom} has to be released on {cell.releaseDate} to land in this bucket.{' '}
             {cell.tone === 'PAST'
-              ? `That date passed ${cell.weeksLate} ${cell.weeksLate === 1 ? 'week' : 'weeks'} ago, so this order cannot be placed in time. It is shown rather than dropped, because the fact that it is late is the point.`
+              ? `That date passed ${cell.daysLate} ${cell.daysLate === 1 ? 'day' : 'days'} ago, so this order cannot be placed in time. It is shown rather than dropped, because the fact that it is late is the point.`
               : 'That date is still ahead, so this one can still be placed.'}
           </TooltipContent>
         </Tooltip>
@@ -358,6 +373,25 @@ function collapseToWeeks(detail: MaterialDetail): { buckets: ChartBucket[]; rows
         ? indexes.reduce((sum, index) => sum + (row.values[index] ?? 0), 0)
         : (row.values[indexes[indexes.length - 1] as number] ?? 0),
     ),
+    // The week's worst point, which is where the netting walk acted.
+    //
+    // Collapsing days into a week takes the closing balance, and this is the
+    // view the grid opens on — so W36 read 285 above a 132 buffer while the run
+    // was netting a shortfall against 131 on the Monday, and the net requirement
+    // row underneath looked like it had come from nowhere. Carried only where it
+    // differs from the close, so a week that simply declines stays quiet.
+    ...(row.aggregate === 'LAST' && row.tone === 'NEGATIVE_IS_BAD'
+      ? {
+          trough: groups.map((indexes) => {
+            const close = row.values[indexes[indexes.length - 1] as number] ?? 0;
+            const low = indexes.reduce(
+              (lowest, index) => Math.min(lowest, row.trough?.[index] ?? row.values[index] ?? 0),
+              Number.POSITIVE_INFINITY,
+            );
+            return Number.isFinite(low) && low < close ? low : null;
+          }),
+        }
+      : {}),
     // Annotations concatenate — a week holds every release date its days held.
     // Dropping them here is how the "W26, ten weeks ago" beat would vanish the
     // moment the grid was switched to weeks, which is how it is usually read.

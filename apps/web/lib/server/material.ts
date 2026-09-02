@@ -22,6 +22,7 @@ import {
   componentFactor,
   bucketFlow,
   bucketLevel,
+  bucketTrough,
   raiseExceptions,
   rankExceptions,
   zoneOfDay,
@@ -258,18 +259,33 @@ function buildGrid(
     label: string,
     series: ArrayLike<number>,
     aggregate: GridRow['aggregate'],
-    options: Partial<Pick<GridRow, 'indent' | 'emphasis' | 'tone' | 'note' | 'cells'>> = {},
-  ): GridRow => ({
-    key,
-    label,
-    indent: options.indent ?? 0,
-    values: (aggregate === 'SUM' ? bucketFlow(series, buckets) : bucketLevel(series, buckets)).map(round),
-    aggregate,
-    emphasis: options.emphasis ?? 'NONE',
-    tone: options.tone ?? 'NEUTRAL',
-    note: options.note ?? null,
-    ...(options.cells ? { cells: options.cells } : {}),
-  });
+    options: Partial<Pick<GridRow, 'indent' | 'emphasis' | 'tone' | 'note' | 'cells'>> & { showTrough?: boolean } = {},
+  ): GridRow => {
+    const values = (aggregate === 'SUM' ? bucketFlow(series, buckets) : bucketLevel(series, buckets)).map(round);
+
+    // A level row closes where it closes and dips where it dips, and netting
+    // acted on the dip. Carried only where the two differ, so a daily bucket —
+    // where they never can — stays quiet.
+    const trough =
+      options.showTrough && aggregate === 'LAST'
+        ? bucketTrough(series, buckets)
+            .map(round)
+            .map((low, index) => (low < (values[index] as number) ? low : null))
+        : undefined;
+
+    return {
+      key,
+      label,
+      indent: options.indent ?? 0,
+      values,
+      ...(trough && trough.some((low) => low !== null) ? { trough } : {}),
+      aggregate,
+      emphasis: options.emphasis ?? 'NONE',
+      tone: options.tone ?? 'NEUTRAL',
+      note: options.note ?? null,
+      ...(options.cells ? { cells: options.cells } : {}),
+    };
+  };
 
   const inTransitOrQa = new Float64Array(horizon + 1);
   for (let day = 0; day <= horizon; day += 1) inTransitOrQa[day] = plan.qaReleases[day] as number;
@@ -296,6 +312,7 @@ function buildGrid(
       note: 'On site and not yet stock. Dated to the day it is expected to clear.',
     }),
     row('balanceBefore', 'Projected balance before planned orders', plan.projectedBeforePlanned, 'LAST', {
+      showTrough: true,
       emphasis: 'BALANCE',
       tone: 'NEGATIVE_IS_BAD',
       note: 'The honest position: stock and existing orders, with nothing the system is merely proposing.',
@@ -324,6 +341,7 @@ function buildGrid(
       cells: releaseCells,
     }),
     row('balanceAfter', 'Projected balance after planned orders', plan.projectedAvailable, 'LAST', {
+      showTrough: true,
       emphasis: 'BALANCE',
       tone: 'NEGATIVE_IS_BAD',
       note: 'The plan, if every order it proposes is actually placed — including the ones whose release date has passed.',
@@ -353,14 +371,14 @@ function buildReleaseCells(
     const index = buckets.findIndex((bucket) => receiptDay >= bucket.startDay && receiptDay <= bucket.endDay);
     if (index === -1) continue;
 
-    const releaseDay = toEpochDay(order.releaseDate) - context.planningEpochDay;
-    const weeksLate = releaseDay < 0 ? Math.ceil(-releaseDay / 7) : 0;
+    const releaseDay = order.releaseDay;
+    const daysLate = releaseDay < 0 ? -releaseDay : 0;
     (cells[index] as GridCell[]).push({
       text: weekLabel(order.releaseDate),
       tone: order.isReleaseInPast ? 'PAST' : 'NEUTRAL',
       releaseWeek: weekLabel(order.releaseDate),
       releaseDate: order.releaseDate,
-      weeksLate,
+      daysLate,
       qty: round(order.qty),
     });
   }
@@ -451,6 +469,16 @@ function buildParameters(facts: MaterialFacts, context: RunContext): ParameterVi
   add('roundingValue', 'Rounding value', master.roundingValue, { uom: facts.baseUom, editable: true });
   add('maxLotSize', 'Maximum lot', master.maxLotSize, { uom: facts.baseUom, editable: true });
   add('lotSizeRule', 'Lot-sizing rule', master.lotSizeRule);
+  // The parameter that decides how much a POQ material orders, and it appeared
+  // on no screen. RM-30137's 800 MT came from a 27-day period of supply while
+  // the explanation blamed a 386 MT minimum order quantity that had not bound.
+  if (master.lotSizeRule === 'POQ') {
+    add('periodsOfSupplyDays', 'Period of supply', master.periodsOfSupplyDays, {
+      uom: 'days',
+      editable: true,
+      note: 'How much forward demand one order covers. Under POQ this, not the minimum order quantity, is usually what sets the quantity.',
+    });
+  }
   add('storageCapacity', 'Storage capacity', master.storageCapacity, {
     uom: facts.baseUom,
     note: 'What the plant can hold of this item at once — a different question from how much can be bought.',
@@ -546,7 +574,7 @@ function buildRecommendation(
 ): RecommendationView | null {
   const first = explanations[0];
   if (!first) return null;
-  const releaseDay = toEpochDay(first.releaseDate) - context.planningEpochDay;
+  const releaseDay = first.releaseDay;
   void facts;
   return {
     qty: Math.round(first.qty),
@@ -557,7 +585,7 @@ function buildRecommendation(
     releaseDate: first.releaseDate,
     releaseWeek: weekLabel(first.releaseDate),
     isReleaseInPast: first.isReleaseInPast,
-    weeksLate: releaseDay < 0 ? Math.round(-releaseDay / 7) : 0,
+    daysLate: releaseDay < 0 ? -releaseDay : 0,
     leadTimeDays: first.totalOffsetDays,
   };
 }
