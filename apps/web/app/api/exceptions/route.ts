@@ -17,6 +17,10 @@ export const dynamic = 'force-dynamic';
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const group = url.searchParams.get('group');
+  // An absent ?limit is not a limit of zero. Number(null) is 0, and 0 is an
+  // integer, so reading it straight through emptied every group on the screen
+  // while the counts above them stayed right.
+  const limit = url.searchParams.get('limit');
 
   return NextResponse.json(
     exceptionQueue(url.searchParams.get('scenario') ?? 'baseline', {
@@ -25,9 +29,7 @@ export async function GET(request: Request) {
       includeDismissed: url.searchParams.get('dismissed') === 'true',
       // How many of each group to return. The screen wants the top of the
       // ranking; anything checking the whole book wants all of it.
-      limitPerGroup: Number.isInteger(Number(url.searchParams.get('limit')))
-        ? Number(url.searchParams.get('limit'))
-        : undefined,
+      limitPerGroup: limit !== null && Number.isInteger(Number(limit)) ? Number(limit) : undefined,
     }),
   );
 }
