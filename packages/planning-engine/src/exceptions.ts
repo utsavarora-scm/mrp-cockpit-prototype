@@ -266,6 +266,16 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
 
   const biteDay = firstStockoutDay !== -1 ? firstStockoutDay : firstBreachDay;
 
+  // The plan as it stands, for the counterfactuals to be measured against.
+  const baselineWorstDeficit = worstDeficitWithShift(
+    plan.projectedAvailableFeasible,
+    safetyStock,
+    horizonDays,
+    0,
+    0,
+    0
+  );
+
   // Whether ordering helps, decided by whether ordering actually closes it.
   //
   // This used to be `biteDay >= fence.earliestReceiptDay` — a statement about
@@ -513,11 +523,38 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
       severity: 'HIGH',
       headline: `${round(qty)} ${context.baseUom} of ${context.description} is past its date with no goods receipt — the oldest by ${-worst} days.`,
       biteDay: 0,
-      qtyAtStake: qty,
+      // What the plan loses if these never arrive, not what they weigh.
+      //
+      // A line's quantity is not an exposure: most overdue supply lands into a
+      // position that can absorb it. The number worth a phone call is how much
+      // deeper the shortfall gets with the line taken out — one counterfactual,
+      // capped at the line, rather than a daily deficit summed over every day it
+      // persists.
+      qtyAtStake: Math.min(
+        qty,
+        Math.max(
+          0,
+          worstDeficitWithShift(plan.projectedAvailableFeasible, safetyStock, horizonDays, -qty, 0, horizonDays + 1) -
+            baselineWorstDeficit
+        )
+      ),
       reachableByOrdering: false,
       operands: [
         { label: 'Quantity overdue', value: qty, source: 'Open schedule lines past their expected date' },
         { label: 'Days overdue, worst line', value: -worst, source: 'Expected date against the planning date' },
+        {
+          label: 'Worst shortfall if it never arrives',
+          value: worstDeficitWithShift(
+            plan.projectedAvailableFeasible,
+            safetyStock,
+            horizonDays,
+            -qty,
+            0,
+            horizonDays + 1
+          ),
+          source: 'The balance re-rolled without these lines',
+        },
+        { label: 'Worst shortfall as planned', value: baselineWorstDeficit, source: 'Balance after placeable orders' },
       ],
       actions: [
         `Trace ${pastDue.map((line) => `${line.orderId}/${line.line}`).join(', ')}.`,
@@ -538,7 +575,23 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
         severity: 'MEDIUM',
         headline: `${round(late.qty)} ${context.baseUom} on ${late.orderId} line ${late.line} lands ${late.expectedDay - biteDay} days after the position needs it.`,
         biteDay,
-        qtyAtStake: late.qty,
+        // What advancing it is worth: the improvement in the worst shortfall if
+        // the line landed when the position needs it rather than when it is due.
+        qtyAtStake: Math.min(
+          late.qty,
+          Math.max(
+            0,
+            baselineWorstDeficit -
+              worstDeficitWithShift(
+                plan.projectedAvailableFeasible,
+                safetyStock,
+                horizonDays,
+                late.qty,
+                biteDay,
+                late.expectedDay
+              )
+          )
+        ),
         reachableByOrdering: true,
         operands: [
           { label: 'Needed by day', value: biteDay, source: 'Projected balance after placeable orders' },
@@ -883,6 +936,31 @@ function expediteActions(context: MaterialContext, biteDay: number): string[] {
   }
 
   return actions;
+}
+
+/**
+ * The worst shortfall against the norm, with one receipt shifted in or out.
+ *
+ * Moving a receipt of `qty` so that it is present over `[fromDay, toDay)` and
+ * absent elsewhere displaces the rolled balance by exactly `qty` over that
+ * span — so the counterfactual needs no second roll, only an offset. Passing a
+ * negative `qty` removes a receipt; a positive one brings it forward.
+ */
+function worstDeficitWithShift(
+  feasible: ArrayLike<number>,
+  safetyStock: number,
+  horizonDays: number,
+  qty: number,
+  fromDay: number,
+  toDay: number
+): number {
+  let worst = 0;
+  for (let day = 0; day <= horizonDays; day += 1) {
+    const shifted = (feasible[day] as number) + (day >= fromDay && day < toDay ? qty : 0);
+    const deficit = safetyStock - shifted;
+    if (deficit > worst) worst = deficit;
+  }
+  return worst;
 }
 
 /**

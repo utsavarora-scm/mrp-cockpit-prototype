@@ -720,3 +720,90 @@ describe('ranking, by consequence rather than by count', () => {
     expect(first?.biteDay).toBe(2);
   });
 });
+
+describe('exposure on an existing line, as a counterfactual', () => {
+  /** A position that dips 200 below its 500 buffer on day 40. */
+  const balance = series(1_000);
+  balance[40] = 300;
+
+  it('prices an overdue line by what its absence costs, not by its weight', () => {
+    const raised = raiseExceptions(
+      context({
+        plan: plan({ projectedAvailableFeasible: balance }),
+        openLines: [
+          {
+            orderId: 'PO-1',
+            line: 10,
+            qty: 5_000,
+            expectedDay: -30,
+            expectedDate: '2026-08-01',
+            tier: 2,
+            vendorId: 'V-1',
+            vendorName: 'A vendor',
+            hasGrn: false,
+          },
+        ],
+      }),
+      HORIZON
+    );
+    const row = raised.find((entry) => entry.code === 'PAST_DUE');
+    // The line is 5,000. Removing it deepens the worst shortfall from 200 to
+    // 5,200, so it is worth 5,000 — capped at the line, which is the whole of it
+    // here. What matters is that the number came from the balance, not the
+    // weight: with a smaller line the two diverge.
+    expect(row?.qtyAtStake).toBe(5_000);
+    expect(row?.operands.find((o) => o.label === 'Worst shortfall as planned')?.value).toBe(200);
+  });
+
+  it('caps that exposure at the line, however deep the hole', () => {
+    const deep = series(1_000);
+    deep[40] = -9_000;
+    const raised = raiseExceptions(
+      context({
+        plan: plan({ projectedAvailableFeasible: deep }),
+        openLines: [
+          {
+            orderId: 'PO-1',
+            line: 10,
+            qty: 100,
+            expectedDay: -30,
+            expectedDate: '2026-08-01',
+            tier: 2,
+            vendorId: 'V-1',
+            vendorName: 'A vendor',
+            hasGrn: false,
+          },
+        ],
+      }),
+      HORIZON
+    );
+    // A 100 MT line cannot be responsible for a 9,500 MT hole.
+    expect(raised.find((entry) => entry.code === 'PAST_DUE')?.qtyAtStake).toBe(100);
+  });
+
+  it('prices a late line by what advancing it is worth', () => {
+    const raised = raiseExceptions(
+      context({
+        plan: plan({ projectedAvailableFeasible: balance }),
+        openLines: [
+          {
+            orderId: 'PO-2',
+            line: 20,
+            qty: 5_000,
+            expectedDay: 60,
+            expectedDate: '2026-10-30',
+            tier: 2,
+            vendorId: 'V-1',
+            vendorName: 'A vendor',
+            hasGrn: false,
+          },
+        ],
+      }),
+      HORIZON
+    );
+    const row = raised.find((entry) => entry.code === 'PULL_IN');
+    // Advancing it from day 60 to day 40 closes the whole 200 dip, and is worth
+    // exactly that — not the 5,000 the line happens to carry.
+    expect(row?.qtyAtStake).toBe(200);
+  });
+});
