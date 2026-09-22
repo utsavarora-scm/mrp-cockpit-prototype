@@ -191,6 +191,14 @@ export interface GridCell {
    */
   daysLate: number;
   qty: number;
+  /**
+   * How many planned orders this annotation stands for.
+   *
+   * One on a daily cell. More once the grid is regrouped into weeks and several
+   * receipts share a release week — the quantity is what is placed, and the
+   * parcel count is what it is placed as.
+   */
+  parcels: number;
 }
 
 /** One row of the classic planning grid. Fixed order, every cell explainable. */

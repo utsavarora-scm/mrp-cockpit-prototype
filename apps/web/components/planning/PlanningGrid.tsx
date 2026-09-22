@@ -255,12 +255,43 @@ function Row({
 }
 
 /**
+ * Several receipts sharing a release week, merged into the one release they are.
+ *
+ * A weekly grid is read at a weekly cadence, so the quantity going out in a
+ * release week is the fact; how many parcels the netting walk cut it into is a
+ * property of bucket width, not of the plan. The count is kept on the merged
+ * cell so the tooltip can still tell one late parcel from four.
+ */
+function mergeReleaseCells(cells: GridCell[]): GridCell[] {
+  const byWeek = new Map<string, GridCell>();
+
+  for (const cell of cells) {
+    const existing = byWeek.get(cell.releaseWeek);
+    if (existing === undefined) {
+      byWeek.set(cell.releaseWeek, { ...cell, parcels: cell.parcels ?? 1 });
+      continue;
+    }
+    existing.qty += cell.qty;
+    existing.parcels += cell.parcels ?? 1;
+    // The earliest release in the week is the one that binds, and a week is
+    // past if anything in it is.
+    if (cell.releaseDate < existing.releaseDate) {
+      existing.releaseDate = cell.releaseDate;
+      existing.daysLate = cell.daysLate;
+    }
+    if (cell.tone === 'PAST') existing.tone = 'PAST';
+  }
+
+  return [...byWeek.values()].sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
+}
+
+/**
  * The week an order had to be released, under the week it is needed.
  *
- * More than one can share a bucket: a requirement above the maximum lot is cut
- * into several orders, and each has its own release date. They are listed
- * rather than merged, because "two parcels, both already late" is a different
- * sentence from "one parcel, already late".
+ * More than one release week can share a bucket, and each is listed: a week
+ * needing stock released in two different weeks is the single most useful thing
+ * this row says. Receipts sharing a release week are merged into it, because
+ * "15,633 EA, both parcels already late" is the sentence, and `W35 W35` is not.
  */
 function ReleaseCells({ cells, uom }: { cells: GridCell[]; uom: string }) {
   return (
@@ -275,14 +306,17 @@ function ReleaseCells({ cells, uom }: { cells: GridCell[]; uom: string }) {
               )}
             >
               {cell.text}
+              {cell.parcels > 1 ? ` ×${cell.parcels}` : ''}
               {cell.tone === 'PAST' ? ' ⚠' : ''}
             </span>
           </TooltipTrigger>
           <TooltipContent className='max-w-[300px]'>
-            {formatNumber(cell.qty)} {uom} has to be released on {cell.releaseDate} to land in this bucket.{' '}
+            {formatNumber(cell.qty)} {uom} has to be released in {cell.releaseWeek}, from {cell.releaseDate}, to land in
+            this bucket
+            {cell.parcels > 1 ? `, across ${cell.parcels} orders` : ''}.{' '}
             {cell.tone === 'PAST'
-              ? `That date passed ${cell.daysLate} ${cell.daysLate === 1 ? 'day' : 'days'} ago, so this order cannot be placed in time. It is shown rather than dropped, because the fact that it is late is the point.`
-              : 'That date is still ahead, so this one can still be placed.'}
+              ? `That date passed ${cell.daysLate} ${cell.daysLate === 1 ? 'day' : 'days'} ago, so ${cell.parcels > 1 ? 'none of it' : 'this order'} can be placed in time. It is shown rather than dropped, because the fact that it is late is the point.`
+              : 'That date is still ahead, so this can still be placed.'}
           </TooltipContent>
         </Tooltip>
       ))}
@@ -392,10 +426,16 @@ function collapseToWeeks(detail: MaterialDetail): { buckets: ChartBucket[]; rows
           }),
         }
       : {}),
-    // Annotations concatenate — a week holds every release date its days held.
-    // Dropping them here is how the "W26, ten weeks ago" beat would vanish the
-    // moment the grid was switched to weeks, which is how it is usually read.
-    ...(row.cells ? { cells: groups.map((indexes) => indexes.flatMap((index) => row.cells?.[index] ?? [])) } : {}),
+    // Annotations merge by release week — a week holds every release week its
+    // days held, once each, carrying the quantity going out in it. Dropping
+    // them entirely is how the "W26, ten weeks ago" beat would vanish the
+    // moment the grid was switched to weeks, which is how it is usually read;
+    // concatenating them raw is how a single cell came to stack `W35 W35 W36
+    // W36 W36 W36`, six chips whose count says nothing except how wide the
+    // bucket is.
+    ...(row.cells
+      ? { cells: groups.map((indexes) => mergeReleaseCells(indexes.flatMap((index) => row.cells?.[index] ?? []))) }
+      : {}),
   }));
 
   return { buckets, rows };

@@ -381,10 +381,93 @@ function buildReleaseCells(
       releaseDate: order.releaseDate,
       daysLate,
       qty: round(order.qty),
+      parcels: 1,
     });
   }
 
   return cells;
+}
+
+/**
+ * A bucket's planned receipts, gathered by the week they have to be released.
+ *
+ * Once the grid is bucketed weekly, the planning cadence is weekly too, and the
+ * number of orders the daily netting walk happened to raise is an artefact of
+ * bucket width rather than a fact about the plan: the same six receipts are six
+ * cells on a daily grid and one cell on a weekly one. What survives the change
+ * of width is quantity against the week it must be released in — which is the
+ * decision a planner actually takes.
+ *
+ * The parcel count is carried alongside rather than dropped, because "15,633 EA
+ * across two orders, both already late" and "15,633 EA in one" are different
+ * conversations with a vendor.
+ */
+interface ReleaseGroup {
+  week: string;
+  qty: number;
+  /** Quantity a rule added on top of the requirement, across the group. */
+  addedByLotSizing: number;
+  parcels: number;
+  /** True where that release week has already passed. */
+  isPast: boolean;
+  /** Earliest release date in the group, which is what binds. */
+  releaseDate: string;
+}
+
+function groupByReleaseWeek(
+  explanations: PlannedOrderExplanation[],
+  context: RunContext,
+  window: CellWindow,
+): ReleaseGroup[] {
+  const groups = new Map<string, ReleaseGroup>();
+
+  for (const order of explanations) {
+    const day = toEpochDay(order.receiptDate) - context.planningEpochDay;
+    if (day < window.startDay || day > window.endDay) continue;
+
+    const week = weekLabel(order.releaseDate);
+    const existing = groups.get(week);
+    const added = Math.max(0, order.qty - order.netRequirement);
+
+    if (existing === undefined) {
+      groups.set(week, {
+        week,
+        qty: order.qty,
+        addedByLotSizing: added,
+        parcels: 1,
+        isPast: order.isReleaseInPast,
+        releaseDate: order.releaseDate,
+      });
+      continue;
+    }
+
+    existing.qty += order.qty;
+    existing.addedByLotSizing += added;
+    existing.parcels += 1;
+    // A week is past if anything in it is: they share a release week, so they
+    // share its fate.
+    existing.isPast = existing.isPast || order.isReleaseInPast;
+    if (order.releaseDate < existing.releaseDate) existing.releaseDate = order.releaseDate;
+  }
+
+  return [...groups.values()].sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
+}
+
+/**
+ * The earliest this bucket could receive anything, under this run's lead time.
+ *
+ * The fence is a material-level date — the first day an order released today
+ * could land — so a bucket that opens after it is reachable from its first day,
+ * one that closes before it cannot be reached at all, and one that straddles it
+ * is reachable from the fence onwards. Answering with a single order's receipt
+ * date instead is what made a weekly cell quote one day out of six.
+ */
+function earliestWithin(facts: MaterialFacts, context: RunContext, window: CellWindow): string | null {
+  const fence = facts.fences.maintained.earliestReceiptDate;
+  const start = fromEpochDay(context.planningEpochDay + window.startDay);
+  const end = fromEpochDay(context.planningEpochDay + window.endDay);
+  if (fence > end) return null;
+  return fence < start ? start : fence;
 }
 
 /**
@@ -686,7 +769,12 @@ export function explain(
     itemId,
     plantId,
     anchor: window === undefined ? null : { row: anchor.row ?? null, label: window.label, week: window.week },
-    sentence: buildSentence(facts, context, order, biteDay),
+    // A weekly cell gets a weekly sentence. Leading it with one order's
+    // quantity is what put "Order 6,656 EA" above a total of 52,793 EA.
+    sentence:
+      window !== undefined && window.label === window.week
+        ? buildWeekSentence(facts, context, window)
+        : buildSentence(facts, context, order, biteDay),
     arithmetic:
       window === undefined || anchor.row === undefined
         ? buildArithmetic(facts, context, order)
@@ -780,6 +868,45 @@ function buildSentence(
     lotClause +
     reachClause
   );
+}
+
+/**
+ * One sentence for a weekly cell, in quantities rather than order counts.
+ *
+ * Whether a week's receipts arrived as six orders or one is a consequence of
+ * how the netting walk was bucketed, not something a planner acts on. What they
+ * act on is how much has to be released, in which week, and how much of it is
+ * already out of reach.
+ */
+function buildWeekSentence(facts: MaterialFacts, context: RunContext, window: CellWindow): string {
+  const uom = facts.baseUom;
+  const explanations = context.plan.orderExplanations.get(planKey(facts.itemId, facts.plantId)) ?? [];
+  const groups = groupByReleaseWeek(explanations, context, window);
+
+  if (groups.length === 0) {
+    return `${facts.description} (${facts.itemId}) needs nothing in ${window.week}. The plan proposes no receipt in this bucket.`;
+  }
+
+  const total = groups.reduce((sum, group) => sum + group.qty, 0);
+  const past = groups.filter((group) => group.isPast);
+  const reachable = groups.filter((group) => !group.isPast);
+  const lateQty = past.reduce((sum, group) => sum + group.qty, 0);
+
+  const head = `${format(total)} ${uom} of ${facts.itemId} (${facts.description}) has to land in ${window.week}.`;
+
+  if (past.length === 0) {
+    const weeks = joinPhrases(groups.map((group) => `${format(group.qty)} ${uom} in ${group.week}`));
+    return `${head} It releases ${weeks}, all still reachable.`;
+  }
+
+  const lateWeeks = joinPhrases(past.map((group) => group.week));
+  const stillQty = total - lateQty;
+  const tail =
+    reachable.length === 0
+      ? ' There is nothing left in this bucket that can still be placed.'
+      : ` The other ${format(stillQty)} ${uom} releases in ${joinPhrases(reachable.map((group) => group.week))} and can still be placed.`;
+
+  return `${head} ${format(lateQty)} ${uom} of that needed releasing in ${lateWeeks}, which has passed, so it cannot be placed in time.${tail}`;
 }
 
 /** The shortage an order serves, carrying the sizing trace the run recorded. */
@@ -1048,10 +1175,106 @@ function buildCellArithmetic(
       return lines;
     }
 
-    default:
-      // Rows 10 to 12 *are* the recommendation, so they get its full working.
+    default: {
+      // Rows 10 to 12 *are* the recommendation, so they get its full working —
+      // but only where the cell is a single day, and the recommendation and the
+      // cell are therefore the same thing. Across a week they are not: six
+      // receipts sum into one cell, and handing that cell the first of them
+      // explained 6,656 EA under a total of 52,793 EA.
+      if (!isDaily) return buildWeeklyReceiptArithmetic(facts, context, bucket);
       return buildArithmetic(facts, context, order);
+    }
   }
+}
+
+/**
+ * A week's planned receipts, by the week each has to be released in.
+ *
+ * The release week is the unit because it is the decision: a planner working a
+ * weekly grid places this week's releases, and whether the engine split them
+ * into four parcels or one does not change what has to be sent. The parcel
+ * count rides along in the source column, where it informs without pretending
+ * to be the quantity.
+ */
+function buildWeeklyReceiptArithmetic(facts: MaterialFacts, context: RunContext, bucket: CellWindow): ExplainLine[] {
+  const uom = facts.baseUom;
+  const lines: ExplainLine[] = [];
+  const push = (
+    label: string,
+    value: number | null,
+    operator: ExplainLine['operator'],
+    source: string | null,
+    emphasis = false,
+  ): void => {
+    lines.push({
+      label,
+      value: value === null ? null : round(value),
+      uom,
+      operator,
+      source,
+      emphasis,
+      expandable: false,
+    });
+  };
+
+  const explanations = context.plan.orderExplanations.get(planKey(facts.itemId, facts.plantId)) ?? [];
+  const groups = groupByReleaseWeek(explanations, context, bucket);
+
+  if (groups.length === 0) {
+    push(`Planned order receipt, ${bucket.week}`, 0, '', 'This run proposes nothing in this bucket', true);
+    return lines;
+  }
+
+  let total = 0;
+  let added = 0;
+  let unreachable = 0;
+  for (let index = 0; index < groups.length; index += 1) {
+    const group = groups[index] as ReleaseGroup;
+    total += group.qty;
+    added += group.addedByLotSizing;
+    if (group.isPast) unreachable += group.qty;
+
+    const parcels = `${group.parcels} ${group.parcels === 1 ? 'order' : 'orders'}`;
+    push(
+      `Release ${group.week}${group.isPast ? ' — already past' : ''}`,
+      group.qty,
+      index === 0 ? '' : '+',
+      group.isPast
+        ? `${parcels}, and cannot now be placed in time`
+        : `${parcels}, released by ${formatDateWithWeekday(group.releaseDate)}`,
+    );
+  }
+
+  push('PLANNED ORDER RECEIPT', total, '=', null, true);
+  if (added > 0) {
+    push('of which added by a rule rather than by demand', added, '', 'Need and rule are never merged');
+  }
+  if (unreachable > 0) {
+    push('of which cannot be placed in time', unreachable, '', 'Its release week has already passed');
+  }
+
+  push(
+    `Lead time ${facts.fences.maintained.totalDays} ${facts.fences.maintained.totalDays === 1 ? 'day' : 'days'}`,
+    null,
+    '',
+    'Vendor response, readiness, transit, customs, receipt and quality release',
+  );
+
+  // The earliest anything could land *inside this bucket*, not one order's
+  // receipt date. A week that closes before the fence cannot be reached at all,
+  // and says so rather than quoting a date outside itself.
+  const earliest = earliestWithin(facts, context, bucket);
+  push(
+    earliest === null ? `NOTHING CAN LAND IN ${bucket.week}` : `EARLIEST ACHIEVABLE ${formatDateWithWeekday(earliest)}`,
+    null,
+    '',
+    earliest === null
+      ? `The lead-time fence clears on ${formatDateWithWeekday(facts.fences.maintained.earliestReceiptDate)}, after this bucket closes`
+      : `${facts.fences.maintained.totalDays} ${facts.fences.maintained.totalDays === 1 ? 'day' : 'days'} from today, walked over the working calendar`,
+    true,
+  );
+
+  return lines;
 }
 
 function buildArithmetic(
@@ -1188,7 +1411,7 @@ function buildArithmetic(
   }
 
   push(
-    `Lead time ${order.totalOffsetDays} days`,
+    `Lead time ${order.totalOffsetDays} ${order.totalOffsetDays === 1 ? 'day' : 'days'}`,
     null,
     '',
     'Vendor response, readiness, transit, customs, receipt and quality release',
@@ -1201,10 +1424,10 @@ function buildArithmetic(
     { emphasis: true },
   );
   push(
-    `EARLIEST ACHIEVABLE ${facts.fences.maintained.earliestReceiptDate}`,
+    `EARLIEST ACHIEVABLE ${formatDateWithWeekday(facts.fences.maintained.earliestReceiptDate)}`,
     null,
     '',
-    `${facts.fences.maintained.totalDays} days from today, walked over the working calendar`,
+    `${facts.fences.maintained.totalDays} ${facts.fences.maintained.totalDays === 1 ? 'day' : 'days'} from today, walked over the working calendar`,
     { emphasis: true },
   );
 
