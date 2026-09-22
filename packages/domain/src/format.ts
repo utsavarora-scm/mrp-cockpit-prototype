@@ -85,3 +85,17 @@ export function formatDateShort(iso: string): string {
 export function formatDateFull(iso: string): string {
   return DATE_FULL.format(new Date(`${iso}T00:00:00Z`));
 }
+
+const WEEKDAY = new Intl.DateTimeFormat('en-IN', { weekday: 'short', timeZone: 'UTC' });
+
+/**
+ * ISO date string → `Wed 02 Sept`.
+ *
+ * The weekday earns its place wherever a date has to be told apart from the
+ * week containing it: `Balance entering W36` and `Balance entering Wed 02 Sept`
+ * are different quantities, and a panel that labels the second with the first
+ * invites the reader to subtract two numbers that were never in the same walk.
+ */
+export function formatDateWithWeekday(iso: string): string {
+  return `${WEEKDAY.format(new Date(`${iso}T00:00:00Z`))} ${formatDateShort(iso)}`;
+}

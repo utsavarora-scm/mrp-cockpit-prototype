@@ -29,6 +29,7 @@ import {
   type Bucket,
 } from '@repo/planning-engine';
 import {
+  formatDateWithWeekday,
   fromEpochDay,
   planKey,
   reasonLabel,
@@ -737,7 +738,7 @@ function buildSentence(
     if (biteDay === -1) {
       return `${facts.description} (${facts.itemId}) is covered across the whole ${Math.round(context.horizonDays / 7)}-week horizon on stock and existing orders. The plan is not asking for anything.`;
     }
-    return `${facts.description} (${facts.itemId}) falls below its ${format(facts.plan.safetyStock)} ${uom} safety stock on ${fromEpochDay(context.planningEpochDay + biteDay)}, and the plan has no order it can propose to cover it.`;
+    return `${facts.description} (${facts.itemId}) falls below its ${format(facts.plan.safetyStock)} ${uom} safety stock on ${formatDateWithWeekday(fromEpochDay(context.planningEpochDay + biteDay))}, and the plan has no order it can propose to cover it.`;
   }
 
   const week = weekLabel(order.receiptDate);
@@ -760,15 +761,22 @@ function buildSentence(
       ? ` The order is ${format(order.qty)} ${uom} — not ${format(order.netRequirement)} ${uom} — because of ${joinPhrases(drivers.map(describeStep))}.`
       : '';
   const reachClause = order.isReleaseInPast
-    ? ` This order needed releasing in ${weekLabel(order.releaseDate)} (${fromEpochDay(toEpochDay(order.releaseDate))}) and cannot now be placed in time.`
-    : ` It has to be released by ${fromEpochDay(toEpochDay(order.releaseDate))} (${weekLabel(order.releaseDate)}).`;
+    ? ` This order needed releasing in ${weekLabel(order.releaseDate)} (${formatDateWithWeekday(order.releaseDate)}) and cannot now be placed in time.`
+    : ` It has to be released by ${formatDateWithWeekday(order.releaseDate)} (${weekLabel(order.releaseDate)}).`;
 
-  const requirementDate = fromEpochDay(context.planningEpochDay + order.requirementDay);
+  const requirementDate = formatDateWithWeekday(fromEpochDay(context.planningEpochDay + order.requirementDay));
   const requirement = facts.plan.grossRequirements[order.requirementDay] as number;
 
   return (
-    `Order ${format(order.qty)} ${uom} of ${facts.itemId} (${facts.description}) to land in ${week} (${fromEpochDay(toEpochDay(order.receiptDate))}). ` +
-    `Demand of ${format(requirement)} ${uom} on ${requirementDate} plus a ${format(order.threshold)} ${uom} safety stock exceeds the ${format(order.balanceBefore)} ${uom} projected on hand by ${format(order.netRequirement)} ${uom}.` +
+    `Order ${format(order.qty)} ${uom} of ${facts.itemId} (${facts.description}) to land in ${week} (${formatDateWithWeekday(order.receiptDate)}). ` +
+    // Led by the position, because the position is what breached.
+    //
+    // `balanceBefore` is read *after* the day's demand comes off, so the older
+    // phrasing — demand plus safety stock exceeding the projected on hand —
+    // charged the demand twice and only reconciled on a material whose opening
+    // position happened to sit exactly on its norm. Saying where the position
+    // lands, and then what it lands short of, subtracts correctly everywhere.
+    `On ${requirementDate} the position falls to ${format(order.balanceBefore)} ${uom} after that day's ${format(requirement)} ${uom} demand, ${format(order.netRequirement)} ${uom} short of the ${format(order.threshold)} ${uom} safety stock.` +
     lotClause +
     reachClause
   );
@@ -903,7 +911,14 @@ function buildCellArithmetic(
 
   // `W39`, not `W39 (W39)` — the label and the week are the same string on a
   // weekly cell, and only differ on a daily one.
-  const where = bucket.label === bucket.week ? bucket.week : `${bucket.label} (${bucket.week})`;
+  const isDaily = bucket.label !== bucket.week;
+  const where = isDaily ? `${formatDateWithWeekday(bucket.label)} (${bucket.week})` : bucket.week;
+
+  // The bucket a balance is entering or closing, which on a daily cell is the
+  // *day* and not the week containing it. Labelling Tuesday's closing balance
+  // `entering W36` is how this panel came to show a Wednesday requirement
+  // against a balance that belonged to neither the day nor the week.
+  const when = isDaily ? formatDateWithWeekday(bucket.label) : bucket.week;
 
   switch (row) {
     case 'gross':
@@ -933,13 +948,13 @@ function buildCellArithmetic(
     case 'balanceAfter': {
       const after = row === 'balanceAfter';
       const series = after ? facts.plan.projectedAvailable : facts.plan.projectedBeforePlanned;
-      push(`Balance entering ${bucket.week}`, opening(series), '', 'Rolled from opening stock', { expandable: true });
+      push(`Balance entering ${when}`, opening(series), '', 'Rolled from opening stock', { expandable: true });
       push('Scheduled receipts', flow(facts.plan.scheduledReceipts), '+', 'Open purchase order schedule lines');
       if (after) push('Planned order receipts', flow(facts.plan.plannedReceipts), '+', 'Orders this run proposes');
       push('Gross requirement', flow(facts.plan.grossRequirements), '−', 'Demand in this bucket', {
         expandable: true,
       });
-      push(`Balance closing ${bucket.week}`, closing(series), '=', null, { emphasis: true });
+      push(`Balance closing ${when}`, closing(series), '=', null, { emphasis: true });
       if (!after) {
         push(
           'Safety stock',
@@ -964,7 +979,7 @@ function buildCellArithmetic(
     }
 
     case 'cover': {
-      push(`Balance closing ${bucket.week}`, closing(facts.plan.projectedAvailable), '', 'Rolled from opening stock');
+      push(`Balance closing ${when}`, closing(facts.plan.projectedAvailable), '', 'Rolled from opening stock');
       push('Mean daily demand', facts.dailyDemandMean, '÷', 'Forward consumption at the planned rate');
       push('Days of cover', closing(facts.plan.daysOfCover), '=', null, { emphasis: true });
       return lines;
@@ -973,26 +988,63 @@ function buildCellArithmetic(
     case 'netRequirement': {
       const gross = flow(facts.plan.grossRequirements);
       const receipts = flow(facts.plan.scheduledReceipts);
-      const before = opening(facts.plan.projectedBeforePlanned);
+      const threshold = facts.plan.safetyStock;
+      const required = gross + threshold;
+
+      // Two balances enter this bucket, and naming only one of them is what
+      // made this panel impossible to read. The curve the grid plots above is
+      // the position on stock and existing orders alone; the walk that raised
+      // this requirement had already topped that curve up with every order it
+      // proposed earlier in the horizon. Netting sized the requirement against
+      // the second, so the second is what the subtraction has to use — and the
+      // orders standing between the two are a line of their own rather than a
+      // silent 15,633 EA step the reader is left to discover.
+      const standing = opening(facts.plan.projectedBeforePlanned);
+      const entering = opening(facts.plan.projectedAvailable);
+      const proposed = entering - standing;
+      const available = entering + receipts;
+
       push(`Gross requirement, ${where}`, gross, '', 'Bill-of-material explosion', { expandable: true });
-      push(
-        'Safety stock',
-        facts.plan.safetyStock,
-        '+',
-        `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`,
-      );
-      push('Required position', gross + facts.plan.safetyStock, '=', null, { emphasis: true });
-      push(`Balance entering ${bucket.week}`, before, '', 'Rolled from opening stock', { expandable: true });
+      push('Safety stock', threshold, '+', `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`);
+      push('Required position', required, '=', null, { emphasis: true });
+
+      if (Math.abs(proposed) < 1) {
+        // Nothing proposed yet, so the two curves agree and splitting them
+        // would be three lines saying one thing.
+        push(`Balance entering ${when}`, entering, '', 'Rolled from opening stock', { expandable: true });
+      } else {
+        push(`On stock and existing orders, entering ${when}`, standing, '', 'Rolled from opening stock', {
+          expandable: true,
+        });
+        push('Planned orders already raised', proposed, '+', 'Proposed earlier in this run');
+        push(`Balance entering ${when}`, entering, '=', null);
+      }
       push('Scheduled receipts', receipts, '+', 'Open purchase order schedule lines');
-      push('Available position', before + receipts, '=', null, { emphasis: true });
-      // Stated, not claimed as this block's difference. Over a week the engine
-      // walks day by day and tops the balance up as it goes, so the bucket's
-      // requirement is the sum of the daily shortfalls rather than the gap
-      // between these two totals — and printing an equals sign over that would
-      // be exactly the kind of arithmetic this panel exists to avoid.
-      push('NET REQUIREMENT', flow(facts.plan.netRequirements), '', 'Summed from the daily netting walk', {
-        emphasis: true,
-      });
+      push('Available position', available, '=', null, { emphasis: true });
+
+      const shortfall = required - available;
+      const net = flow(facts.plan.netRequirements);
+      const residual = net - shortfall;
+
+      if (Math.abs(residual) < 1) {
+        push('NET REQUIREMENT', net, '=', 'Required position less available position', { emphasis: true });
+      } else {
+        // Across a week the walk tops the balance up bucket by bucket and can
+        // finish somewhere other than exactly on the norm — lot sizing rounding
+        // a quantity up, or a receipt landing mid-week. That difference is the
+        // entire gap between the week's shortfall and the week's requirement,
+        // so it gets named. A daily cell almost never reaches this branch: the
+        // walk tops up to the norm and stops.
+        const above = residual >= 0;
+        push('Shortfall against norm', shortfall, '=', null);
+        push(
+          above ? `Closes ${when} above norm by` : `Left uncovered at the close of ${when}`,
+          Math.abs(residual),
+          above ? '+' : '−',
+          above ? 'Lot sizing and receipt timing' : 'More than this run could order in time',
+        );
+        push('NET REQUIREMENT', net, '=', 'Summed from the daily netting walk', { emphasis: true });
+      }
       return lines;
     }
 
@@ -1037,7 +1089,7 @@ function buildArithmetic(
   }
 
   const requirement = facts.plan.grossRequirements[order.requirementDay] as number;
-  const requirementDate = fromEpochDay(context.planningEpochDay + order.requirementDay);
+  const requirementDate = formatDateWithWeekday(fromEpochDay(context.planningEpochDay + order.requirementDay));
 
   push(`Gross requirement, ${requirementDate}`, requirement, '', 'Bill-of-material explosion', {
     expandable: true,
