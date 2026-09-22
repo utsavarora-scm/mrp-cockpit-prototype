@@ -159,16 +159,21 @@ describe('the explain drawer', () => {
     const rows = payload!.arithmetic;
 
     const gross = line(rows, 'Gross requirement')?.value ?? 0;
-    const net = line(rows, 'NET REQUIREMENT')?.value ?? 0;
-    const added = line(rows, 'Added by a rule rather than by demand')?.value ?? 0;
+    const shortfall = line(rows, 'Shortfall against norm')?.value ?? 0;
+    const closes = line(rows, 'Closes W49 above norm by')?.value ?? 0;
     const total = line(rows, 'PLANNED ORDER RECEIPT')?.value ?? 0;
+    const demand = line(rows, 'of which demand requires')?.value ?? 0;
+    const byRule = line(rows, 'of which added by a rule')?.value ?? 0;
 
     expect(gross).toBeCloseTo(206496, 0);
-    expect(net).toBeCloseTo(36214, 0);
-    expect(net + added).toBeCloseTo(total, 0);
+    // planned receipts = shortfall + closing surplus, exactly.
+    expect(shortfall + closes).toBeCloseTo(total, 0);
     expect(total).toBeCloseTo(600000, 0);
+    // and the total splits into what demand asked for and what a rule added.
+    expect(demand).toBeCloseTo(36214, 0);
+    expect(demand + byRule).toBeCloseTo(total, 0);
 
-    // And the chain lands exactly on the top of the ladder.
+    // The chain lands exactly on the top of the ladder.
     expect(payload!.chain[payload!.chain.length - 1]?.resultQty).toBeCloseTo(gross, 0);
   });
 
@@ -185,6 +190,51 @@ describe('the explain drawer', () => {
     const earliest = rows.find((row) => row.label.startsWith('EARLIEST ACHIEVABLE'));
     expect(earliest?.label).toContain('Mon 30 Nov');
     expect(earliest?.source).toContain('opens after the fence');
+  });
+
+  it('sums a bucket the way the grid sums it, rounding included', () => {
+    // RM-30130 in W37: three days of 211.27, 183.43 and 127.98. The grid rounds
+    // each day before the client adds them, so the row reads 211 + 183 + 128 =
+    // 522. The drawer summed the raw series and rounded once, and said 523.
+    const rows = explain('baseline', 'RM-30130', 'M014', {
+      row: 'balanceBefore',
+      fromDate: '2026-09-07',
+      toDate: '2026-09-13',
+    })!.arithmetic;
+
+    expect(line(rows, 'Gross requirement')?.value).toBe(522);
+  });
+
+  it('explains a daily cell the run proposes nothing in', () => {
+    // This used to fall through to the material-level fallback and answer a
+    // cell reading 0 EA with a horizon-wide lowest balance of −494,507 EA.
+    const payload = explain('baseline', 'FG-10002', 'M014', {
+      row: 'plannedReceipt',
+      fromDate: '2026-08-31',
+    });
+    const rows = payload!.arithmetic;
+
+    expect(line(rows, 'PLANNED ORDER RECEIPT')?.value).toBe(0);
+    expect(rows.some((row) => row.label.startsWith('Lowest projected balance'))).toBe(false);
+  });
+
+  it('decomposes the bucket shortfall exactly, lot sizing included', () => {
+    // net = shortfall + closing surplus − what a rule added. An earlier pass
+    // carried only the middle term and called it the whole difference, which
+    // holds in 64% of buckets and was out by as much as 944,425 EA elsewhere.
+    const rows = explain('baseline', 'FG-10002', 'M014', {
+      row: 'netRequirement',
+      fromDate: '2026-08-31',
+      toDate: '2026-09-06',
+    })!.arithmetic;
+
+    const shortfall = line(rows, 'Shortfall against norm')?.value ?? 0;
+    const closes = line(rows, 'Closes W36 above norm by')?.value ?? 0;
+    const net = line(rows, 'NET REQUIREMENT')?.value ?? 0;
+
+    // The bucket's totals cover its norm; the position still dips inside it.
+    expect(shortfall).toBeLessThan(0);
+    expect(shortfall + closes).toBeCloseTo(net, 0);
   });
 
   it('reconciles the net requirement row against the walk that sized it', () => {
