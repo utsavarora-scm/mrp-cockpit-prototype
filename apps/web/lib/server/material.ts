@@ -928,7 +928,17 @@ function buildWeekSentence(facts: MaterialFacts, context: RunContext, window: Ce
   const reachable = groups.filter((group) => !group.isPast);
   const lateQty = past.reduce((sum, group) => sum + group.qty, 0);
 
-  const head = `${format(total)} ${uom} of ${facts.itemId} (${facts.description}) has to land in ${window.week}.`;
+  // Where a rule drove most of the quantity, that is the headline fact about
+  // the cell, not an afterthought below the fold: an order 27 times the size of
+  // the need it serves is the thing a planner would want to argue about.
+  const net = bucketFlowAsShown(facts.plan.netRequirements, window);
+  const byRule = total - net;
+  const ruleClause =
+    byRule >= 0.5 && byRule > net
+      ? ` Demand needs ${format(net)} ${uom} of that; the rest is a rule — the minimum, the rounding value or the maximum lot.`
+      : '';
+
+  const head = `${format(total)} ${uom} of ${facts.itemId} (${facts.description}) has to land in ${window.week}.${ruleClause}`;
 
   if (past.length === 0) {
     const weeks = joinPhrases(groups.map((group) => `${format(group.qty)} ${uom} in ${group.week}`));
@@ -1202,11 +1212,7 @@ function requirementLadder(
   bucket: CellWindow,
   where: string,
   when: string,
-  /** 'NET' resolves the ladder to the net requirement; 'SHORTFALL' stops one
-   *  rung short, so a caller heading for the order total can carry the same
-   *  terms on to it without naming lot sizing twice in opposite directions. */
-  stop: 'NET' | 'SHORTFALL' = 'NET',
-): { lines: ExplainLine[]; net: number; shortfall: number; closing: number; added: number } {
+): { lines: ExplainLine[]; net: number; shortfall: number; closing: number; timing: number } {
   const uom = facts.baseUom;
   const lines: ExplainLine[] = [];
   const push = (
@@ -1269,59 +1275,35 @@ function requirementLadder(
 
   // From the bucket's own subtraction to what the daily walk actually raised.
   //
-  //     net = shortfall + closing surplus − what a rule added
-  //
-  // Exact, everywhere: netting walks day by day inside the bucket, so the
-  // bucket's totals and the walk's answer differ by where the position ends up
-  // against its norm, less whatever lot sizing put there rather than demand.
-  // Each term is named and shown once, and near-zero terms are left out.
-  //
-  // An earlier pass here carried a single "closes above norm by" term and
-  // called it the whole difference. That holds only while lot sizing adds
-  // nothing — 64% of buckets — and was out by as much as 944,425 EA on the
-  // rest.
+  // These differ for a reason worth naming. The bucket subtracts once, charging
+  // all of its demand against the balance entering it. The walk goes day by
+  // day, and only ever tops up to the norm on a day the position actually dips
+  // below it — so a week whose totals are 587 MT short can need 75 MT, because
+  // that is the only day it went under. The gap is timing, not arithmetic, and
+  // it runs the other way just as often: a bucket whose totals cover its norm
+  // can still dip inside it.
   const shortfall = required - available;
   const net = flow(facts.plan.netRequirements);
   const closing = (facts.plan.projectedAvailable[bucket.endDay] as number) - threshold;
-  const added = shortfall + closing - net;
+  const timing = shortfall - net;
 
-  const closingMatters = Math.abs(closing) >= 0.5;
-  const addedMatters = Math.abs(added) >= 0.5;
-
-  if (stop === 'NET' && !closingMatters && !addedMatters) {
+  if (Math.abs(timing) < 0.5) {
     push('NET REQUIREMENT', net, '=', 'Required position less available position', { emphasis: true });
-    return { lines, net, shortfall, closing, added };
+    return { lines, net, shortfall, closing, timing };
   }
 
+  push('Shortfall on the bucket’s totals', shortfall, '=', 'Required position less available position');
   push(
-    'Shortfall against norm',
-    shortfall,
-    '=',
-    // A negative one is not an error and is in fact the common case: the
-    // bucket's totals cover its norm while the position still dips below it on
-    // days inside the bucket.
-    shortfall < -0.5 ? `${when} covers its norm on the bucket‘s totals alone` : null,
+    timing > 0 ? 'Covered by the shape of the bucket' : 'Raised by dips inside the bucket',
+    Math.abs(timing),
+    timing > 0 ? '−' : '+',
+    timing > 0
+      ? `The norm has to hold at each day’s close, not against all of ${when}’s demand at once`
+      : `${when} covers its norm on totals alone, but the position drops under it on days inside`,
   );
-  if (stop === 'SHORTFALL') return { lines, net, shortfall, closing, added };
-  if (closingMatters) {
-    push(
-      closing >= 0 ? `Closes ${when} above norm by` : `Closes ${when} below norm by`,
-      Math.abs(closing),
-      closing >= 0 ? '+' : '−',
-      'Where the position ends the bucket',
-    );
-  }
-  if (addedMatters) {
-    push(
-      'Added by a rule rather than by demand',
-      Math.abs(added),
-      added >= 0 ? '−' : '+',
-      'The minimum, the rounding value and the maximum lot',
-    );
-  }
-  push('NET REQUIREMENT', net, '=', 'Summed from the daily netting walk', { emphasis: true });
+  push('NET REQUIREMENT', net, '=', 'What the daily netting walk actually raised', { emphasis: true });
 
-  return { lines, net, shortfall, closing, added };
+  return { lines, net, shortfall, closing, timing };
 }
 
 /**
@@ -1341,7 +1323,7 @@ function buildWeeklyReceiptArithmetic(
   when: string,
 ): ExplainLine[] {
   const uom = facts.baseUom;
-  const ladder = requirementLadder(facts, bucket, where, when, 'SHORTFALL');
+  const ladder = requirementLadder(facts, bucket, where, when);
   const lines: ExplainLine[] = [...ladder.lines];
   const push = (
     label: string,
@@ -1365,15 +1347,15 @@ function buildWeeklyReceiptArithmetic(
   const groups = groupByReleaseWeek(explanations, context, bucket);
 
   if (groups.length === 0) {
+    push('PLANNED ORDER RECEIPT', 0, '=', 'This run proposes nothing in this bucket', true);
     if (Math.abs(ladder.closing) >= 0.5) {
       push(
-        ladder.closing >= 0 ? `Closes ${when} above norm by` : `Closes ${when} below norm by`,
+        ladder.closing >= 0 ? `Closes ${when} above its norm by` : `Closes ${when} below its norm by`,
         Math.abs(ladder.closing),
-        ladder.closing >= 0 ? '+' : '−',
+        '',
         'Where the position ends the bucket',
       );
     }
-    push('PLANNED ORDER RECEIPT', 0, '=', 'This run proposes nothing in this bucket', true);
     return lines;
   }
 
@@ -1386,37 +1368,40 @@ function buildWeeklyReceiptArithmetic(
   let unreachable = 0;
   for (const group of groups) if (group.isPast) unreachable += group.qty;
 
-  // From the bucket's own shortfall to the quantity that will actually land.
+  // From what demand needs to what will actually be ordered.
   //
-  //     planned receipts = shortfall + closing surplus
-  //
-  // Exact, everywhere, and the same two terms the net requirement cell resolves
-  // the other way. Naming them once here and reporting demand and rule as
-  // shares of the total underneath keeps lot sizing from appearing twice with
-  // opposite signs.
-  if (Math.abs(ladder.closing) >= 0.5) {
+  // In that order, because that is the causality: the walk raised a need, a
+  // rule enlarged it, and the order is the result. An earlier pass ran it the
+  // other way — shortfall, then the surplus the bucket closes with, then the
+  // total — which is arithmetically exact and reads backwards, since the
+  // closing surplus is a *consequence* of the minimum rather than a reason
+  // for it. On a 75 MT need met by a 2,050 MT minimum, that ordering asked
+  // the reader to accept a 1,462 MT overshoot as an input.
+  const byRule = total - ladder.net;
+  if (Math.abs(byRule) >= 0.5) {
     push(
-      ladder.closing >= 0 ? `Closes ${when} above norm by` : `Closes ${when} below norm by`,
-      Math.abs(ladder.closing),
-      ladder.closing >= 0 ? '+' : '−',
-      'Where the position ends the bucket',
+      'Added by a rule rather than by demand',
+      byRule,
+      '+',
+      'The minimum, the rounding value and the maximum lot, in that order',
     );
   }
-  const stated = round(ladder.shortfall) + (Math.abs(ladder.closing) >= 0.5 ? round(ladder.closing) : 0);
+  const stated = round(ladder.net) + (Math.abs(byRule) >= 0.5 ? round(byRule) : 0);
   if (Math.abs(stated - total) >= 0.005) {
     push('Rounding', total - stated, '+', 'Daily buckets rounded before they were added');
   }
   push('PLANNED ORDER RECEIPT', total, '=', null, true);
 
-  // The same total, split by what asked for it. A restatement, so no operators.
-  const byRule = total - ladder.net;
-  if (Math.abs(byRule) >= 0.5) {
-    push('of which demand requires', ladder.net, '', 'The net requirement the walk raised');
+  // Where that leaves the position: stated, not summed, because it is what the
+  // order did and not a term that produced it.
+  if (Math.abs(ladder.closing) >= 0.5) {
     push(
-      'of which added by a rule rather than by demand',
-      byRule,
+      ladder.closing >= 0 ? `Closes ${when} above its norm by` : `Closes ${when} below its norm by`,
+      Math.abs(ladder.closing),
       '',
-      'The minimum, the rounding value and the maximum lot, in that order',
+      Math.abs(byRule) >= 0.5 && ladder.closing > 0
+        ? 'The overshoot the rule above leaves behind'
+        : 'Where the position ends the bucket',
     );
   }
 

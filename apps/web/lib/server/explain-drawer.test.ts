@@ -146,11 +146,11 @@ describe('the explain drawer', () => {
     expect(sentence).toMatch(/^Order 250 MT/);
   });
 
-  it('carries the ladder through lot sizing, so the chain has a line to land on', () => {
-    // PM-88467 in W49: a 36,214 EA shortfall met by a 600,000 EA minimum. The
-    // chain below the panel derives the *gross requirement*, so that figure has
-    // to be on screen — the block used to open at the order total, leaving the
-    // 206,496 EA the chain ends at with nothing to attach to.
+  it('reads need first, rule second, order last', () => {
+    // PM-88467 in W49: a 36,214 EA need met by a 600,000 EA minimum. The block
+    // used to open at the bucket shortfall and add the surplus the week closes
+    // with, which is exact and reads backwards — that surplus is a consequence
+    // of the minimum, not a reason for it.
     const payload = explain('baseline', 'PM-88467', 'M014', {
       row: 'plannedReceipt',
       fromDate: '2026-11-30',
@@ -159,21 +159,25 @@ describe('the explain drawer', () => {
     const rows = payload!.arithmetic;
 
     const gross = line(rows, 'Gross requirement')?.value ?? 0;
-    const shortfall = line(rows, 'Shortfall against norm')?.value ?? 0;
-    const closes = line(rows, 'Closes W49 above norm by')?.value ?? 0;
+    const net = line(rows, 'NET REQUIREMENT')?.value ?? 0;
+    const byRule = line(rows, 'Added by a rule rather than by demand')?.value ?? 0;
     const total = line(rows, 'PLANNED ORDER RECEIPT')?.value ?? 0;
-    const demand = line(rows, 'of which demand requires')?.value ?? 0;
-    const byRule = line(rows, 'of which added by a rule')?.value ?? 0;
 
     expect(gross).toBeCloseTo(206496, 0);
-    // planned receipts = shortfall + closing surplus, exactly.
-    expect(shortfall + closes).toBeCloseTo(total, 0);
+    expect(net).toBeCloseTo(36214, 0);
+    expect(net + byRule).toBeCloseTo(total, 0);
     expect(total).toBeCloseTo(600000, 0);
-    // and the total splits into what demand asked for and what a rule added.
-    expect(demand).toBeCloseTo(36214, 0);
-    expect(demand + byRule).toBeCloseTo(total, 0);
 
-    // The chain lands exactly on the top of the ladder.
+    // The order comes before its consequence, and the consequence does not
+    // pretend to be an operand.
+    const netAt = rows.findIndex((row) => row.label.startsWith('NET REQUIREMENT'));
+    const totalAt = rows.findIndex((row) => row.label.startsWith('PLANNED ORDER RECEIPT'));
+    const closesAt = rows.findIndex((row) => row.label.startsWith('Closes W49'));
+    expect(netAt).toBeLessThan(totalAt);
+    expect(closesAt).toBeGreaterThan(totalAt);
+    expect(rows[closesAt]?.operator).toBe('');
+
+    // And the chain lands on the top of the ladder.
     expect(payload!.chain[payload!.chain.length - 1]?.resultQty).toBeCloseTo(gross, 0);
   });
 
@@ -218,23 +222,42 @@ describe('the explain drawer', () => {
     expect(rows.some((row) => row.label.startsWith('Lowest projected balance'))).toBe(false);
   });
 
-  it('decomposes the bucket shortfall exactly, lot sizing included', () => {
-    // net = shortfall + closing surplus − what a rule added. An earlier pass
-    // carried only the middle term and called it the whole difference, which
-    // holds in 64% of buckets and was out by as much as 944,425 EA elsewhere.
+  it('names the gap between a bucket subtraction and the daily walk', () => {
+    // The bucket subtracts once, charging all its demand against the balance
+    // entering it; the walk only tops up on a day the position actually dips
+    // below the norm. FG-10002 in W36 covers its norm on totals alone and still
+    // raises 6,021 EA, because it goes under inside the week.
     const rows = explain('baseline', 'FG-10002', 'M014', {
       row: 'netRequirement',
       fromDate: '2026-08-31',
       toDate: '2026-09-06',
     })!.arithmetic;
 
-    const shortfall = line(rows, 'Shortfall against norm')?.value ?? 0;
-    const closes = line(rows, 'Closes W36 above norm by')?.value ?? 0;
+    const shortfall = line(rows, 'Shortfall on the bucket')?.value ?? 0;
+    const dips = line(rows, 'Raised by dips inside the bucket')?.value ?? 0;
     const net = line(rows, 'NET REQUIREMENT')?.value ?? 0;
 
-    // The bucket's totals cover its norm; the position still dips inside it.
     expect(shortfall).toBeLessThan(0);
-    expect(shortfall + closes).toBeCloseTo(net, 0);
+    expect(shortfall + dips).toBeCloseTo(net, 0);
+    expect(net).toBeCloseTo(6021, 0);
+  });
+
+  it('names the same gap running the other way', () => {
+    // RM-30130 in W45: 587 MT short on the week's totals, but the position only
+    // dips below its norm on one day, so the walk raises 75 MT.
+    const rows = explain('baseline', 'RM-30130', 'M014', {
+      row: 'plannedReceipt',
+      fromDate: '2026-11-02',
+      toDate: '2026-11-08',
+    })!.arithmetic;
+
+    const shortfall = line(rows, 'Shortfall on the bucket')?.value ?? 0;
+    const covered = line(rows, 'Covered by the shape of the bucket')?.value ?? 0;
+    const net = line(rows, 'NET REQUIREMENT')?.value ?? 0;
+
+    expect(shortfall).toBeCloseTo(587, 0);
+    expect(shortfall - covered).toBeCloseTo(net, 0);
+    expect(net).toBeCloseTo(75, 0);
   });
 
   it('reconciles the net requirement row against the walk that sized it', () => {
