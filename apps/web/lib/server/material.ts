@@ -764,7 +764,7 @@ export function explain(
       window === undefined
         ? buildSentence(facts, context, order, biteDay)
         : window.label === window.week
-          ? buildWeekSentence(facts, context, window)
+          ? buildWeekSentence(facts, context, window, anchor.row)
           : anchoredOrder !== null
             ? buildSentence(facts, context, anchoredOrder, biteDay)
             : buildDaySentence(facts, context, window, explanations),
@@ -914,13 +914,41 @@ function buildDaySentence(
  * act on is how much has to be released, in which week, and how much of it is
  * already out of reach.
  */
-function buildWeekSentence(facts: MaterialFacts, context: RunContext, window: CellWindow): string {
+function buildWeekSentence(
+  facts: MaterialFacts,
+  context: RunContext,
+  window: CellWindow,
+  row: string | undefined,
+): string {
   const uom = facts.baseUom;
   const explanations = context.plan.orderExplanations.get(planKey(facts.itemId, facts.plantId)) ?? [];
   const groups = groupByReleaseWeek(explanations, context, window);
 
   if (groups.length === 0) {
     return `${facts.description} (${facts.itemId}) needs nothing in ${window.week}. The plan proposes no receipt in this bucket.`;
+  }
+
+  // A net requirement cell is not a planned order receipt cell.
+  //
+  // Every weekly cell used to get the receipt sentence, so opening the net
+  // requirement row on RM-30130 led with "2,050 MT has to land in W45" above a
+  // block that derives 75 MT and never mentions 2,050 at all.
+  if (row === 'netRequirement') {
+    const net = bucketFlowAsShown(facts.plan.netRequirements, window);
+    if (net < 0.5) {
+      return `${facts.description} (${facts.itemId}) holds its norm through every day of ${window.week}. Nothing is needed.`;
+    }
+    const dips: string[] = [];
+    for (let day = window.startDay; day <= window.endDay; day += 1) {
+      if (round(facts.plan.netRequirements[day] as number) > 0) {
+        dips.push(formatDateWithWeekday(fromEpochDay(context.planningEpochDay + day)));
+      }
+    }
+    const which =
+      dips.length === 1
+        ? `on ${dips[0]}`
+        : `across ${dips.length} days — ${joinPhrases(dips.slice(0, 3))}${dips.length > 3 ? ' and more' : ''}`;
+    return `${facts.description} (${facts.itemId}) needs ${format(net)} ${facts.baseUom} in ${window.week}: that is how far below its ${format(facts.plan.safetyStock)} ${facts.baseUom} safety stock the position closes ${which}.`;
   }
 
   const total = groups.reduce((sum, group) => sum + group.qty, 0);
@@ -933,9 +961,18 @@ function buildWeekSentence(facts: MaterialFacts, context: RunContext, window: Ce
   // the need it serves is the thing a planner would want to argue about.
   const net = bucketFlowAsShown(facts.plan.netRequirements, window);
   const byRule = total - net;
+  const requirements = facts
+    ? (context.plan.requirementExplanations.get(planKey(facts.itemId, facts.plantId)) ?? [])
+    : [];
+  const inBucket = requirements.filter((row) => row.day >= window.startDay && row.day <= window.endDay);
+  const drivers = (inBucket.length === 1 ? (inBucket[0]?.sizingTrace ?? []) : []).filter(
+    (step) => step.kind !== 'MAX_LOT_SPLIT' && step.changedQuantity,
+  );
   const ruleClause =
     byRule >= 0.5 && byRule > net
-      ? ` Demand needs ${format(net)} ${uom} of that; the rest is a rule — the minimum, the rounding value or the maximum lot.`
+      ? drivers.length > 0
+        ? ` Demand needs ${format(net)} ${uom} of that; the rest is ${joinPhrases(drivers.map(describeStep))}.`
+        : ` Demand needs ${format(net)} ${uom} of that; the rest is lot sizing.`
       : '';
 
   const head = `${format(total)} ${uom} of ${facts.itemId} (${facts.description}) has to land in ${window.week}.${ruleClause}`;
@@ -1176,7 +1213,7 @@ function buildCellArithmetic(
     }
 
     case 'netRequirement':
-      return requirementLadder(facts, bucket, where, when).lines;
+      return requirementLadder(facts, context, bucket, where, when).lines;
 
     default: {
       // Rows 10 to 12 *are* the recommendation, so they get its full working —
@@ -1209,10 +1246,17 @@ function buildCellArithmetic(
  */
 function requirementLadder(
   facts: MaterialFacts,
+  context: RunContext,
   bucket: CellWindow,
   where: string,
   when: string,
-): { lines: ExplainLine[]; net: number; shortfall: number; closing: number; timing: number } {
+): {
+  lines: ExplainLine[];
+  net: number;
+  shortfall: number;
+  closing: number;
+  dips: Array<{ day: number; qty: number }>;
+} {
   const uom = facts.baseUom;
   const lines: ExplainLine[] = [];
   const push = (
@@ -1273,37 +1317,53 @@ function requirementLadder(
   push('Scheduled receipts', receipts, '+', 'Open purchase order schedule lines');
   push('Available position', available, '=', null, { emphasis: true });
 
-  // From the bucket's own subtraction to what the daily walk actually raised.
+  // Which days actually went under, because that is what the walk added up.
   //
-  // These differ for a reason worth naming. The bucket subtracts once, charging
-  // all of its demand against the balance entering it. The walk goes day by
-  // day, and only ever tops up to the norm on a day the position actually dips
-  // below it — so a week whose totals are 587 MT short can need 75 MT, because
-  // that is the only day it went under. The gap is timing, not arithmetic, and
-  // it runs the other way just as often: a bucket whose totals cover its norm
-  // can still dip inside it.
+  // A bucket subtracts once, charging all of its demand against the balance
+  // entering it. The walk goes day by day and only tops up on a day the
+  // position closes below its norm. W45 is 587 MT short on that one-shot
+  // subtraction and raises 75 MT, because only one day in it goes under.
+  //
+  // Two earlier passes tried to bridge those with a derived term — "left
+  // uncovered at the close", then "covered by the shape of the bucket". Both
+  // footed and neither meant anything to read. The days are the answer, and
+  // they are already in the series: naming them costs three lines and needs no
+  // explanation at all.
   const shortfall = required - available;
   const net = flow(facts.plan.netRequirements);
   const closing = (facts.plan.projectedAvailable[bucket.endDay] as number) - threshold;
-  const timing = shortfall - net;
 
-  if (Math.abs(timing) < 0.5) {
-    push('NET REQUIREMENT', net, '=', 'Required position less available position', { emphasis: true });
-    return { lines, net, shortfall, closing, timing };
+  const dips: Array<{ day: number; qty: number }> = [];
+  for (let day = bucket.startDay; day <= bucket.endDay; day += 1) {
+    const qty = round(facts.plan.netRequirements[day] as number);
+    if (qty > 0) dips.push({ day, qty });
   }
 
-  push('Shortfall on the bucket’s totals', shortfall, '=', 'Required position less available position');
-  push(
-    timing > 0 ? 'Covered by the shape of the bucket' : 'Raised by dips inside the bucket',
-    Math.abs(timing),
-    timing > 0 ? '−' : '+',
-    timing > 0
-      ? `The norm has to hold at each day’s close, not against all of ${when}’s demand at once`
-      : `${when} covers its norm on totals alone, but the position drops under it on days inside`,
-  );
-  push('NET REQUIREMENT', net, '=', 'What the daily netting walk actually raised', { emphasis: true });
+  if (dips.length === 0 || (dips.length === 1 && bucket.startDay === bucket.endDay)) {
+    push('NET REQUIREMENT', net, '=', 'Required position less available position', { emphasis: true });
+    return { lines, net, shortfall, closing, dips };
+  }
 
-  return { lines, net, shortfall, closing, timing };
+  // At most four, then the rest in one line: a fortnightly bucket on a daily
+  // material would otherwise print fourteen.
+  const shown = dips.slice(0, 4);
+  for (let index = 0; index < shown.length; index += 1) {
+    const dip = shown[index] as { day: number; qty: number };
+    push(
+      formatDateWithWeekday(fromEpochDay(context.planningEpochDay + dip.day)),
+      dip.qty,
+      index === 0 ? '' : '+',
+      index === 0 ? 'Closes under its norm by this much' : null,
+    );
+  }
+  if (dips.length > shown.length) {
+    let rest = 0;
+    for (const dip of dips.slice(shown.length)) rest += dip.qty;
+    push(`And ${dips.length - shown.length} more days in ${when}`, rest, '+', 'Each one closing under its norm');
+  }
+  push('NET REQUIREMENT', net, '=', `The days in ${when} that go under, added up`, { emphasis: true });
+
+  return { lines, net, shortfall, closing, dips };
 }
 
 /**
@@ -1323,7 +1383,7 @@ function buildWeeklyReceiptArithmetic(
   when: string,
 ): ExplainLine[] {
   const uom = facts.baseUom;
-  const ladder = requirementLadder(facts, bucket, where, when);
+  const ladder = requirementLadder(facts, context, bucket, where, when);
   const lines: ExplainLine[] = [...ladder.lines];
   const push = (
     label: string,
@@ -1377,16 +1437,38 @@ function buildWeeklyReceiptArithmetic(
   // closing surplus is a *consequence* of the minimum rather than a reason
   // for it. On a 75 MT need met by a 2,050 MT minimum, that ordering asked
   // the reader to accept a 1,462 MT overshoot as an input.
+  // What each rule did, from the trace the run recorded — not a single line
+  // calling the whole overshoot "a rule".
+  //
+  // On RM-30130 that generic line said "the minimum, the rounding value and the
+  // maximum lot", and the minimum had not bound at all: a 16-day period of
+  // supply took 75 MT to 2,033 MT and a 25 MT vendor increment took it to
+  // 2,050. Naming the wrong parameter is worse than naming none, because the
+  // planner goes and argues about it.
   const byRule = total - ladder.net;
-  if (Math.abs(byRule) >= 0.5) {
-    push(
-      'Added by a rule rather than by demand',
-      byRule,
-      '+',
-      'The minimum, the rounding value and the maximum lot, in that order',
-    );
+  const requirements = context.plan.requirementExplanations.get(planKey(facts.itemId, facts.plantId)) ?? [];
+  const inBucket = requirements.filter((row) => row.day >= bucket.startDay && row.day <= bucket.endDay);
+  const trace = inBucket.length === 1 ? (inBucket[0]?.sizingTrace ?? []) : [];
+
+  if (trace.length > 0) {
+    for (const step of trace) {
+      if (step.kind === 'MAX_LOT_SPLIT') continue;
+      const delta = round(step.afterQty) - round(step.beforeQty);
+      if (delta === 0) continue;
+      // The lot-sizing rule labels itself, so repeating it in the source column
+      // says the same words twice. What the rule *did* goes there instead.
+      push(
+        labelStep(step, uom),
+        delta,
+        '+',
+        step.kind === 'RULE' ? 'Covers forward demand, not only the gap' : step.source,
+      );
+    }
+  } else if (Math.abs(byRule) >= 0.5) {
+    push('Added by a rule rather than by demand', byRule, '+', 'Lot sizing, across the orders in this bucket');
   }
-  const stated = round(ladder.net) + (Math.abs(byRule) >= 0.5 ? round(byRule) : 0);
+
+  const stated = round(ladder.net) + round(byRule);
   if (Math.abs(stated - total) >= 0.005) {
     push('Rounding', total - stated, '+', 'Daily buckets rounded before they were added');
   }
@@ -1400,7 +1482,7 @@ function buildWeeklyReceiptArithmetic(
       Math.abs(ladder.closing),
       '',
       Math.abs(byRule) >= 0.5 && ladder.closing > 0
-        ? 'The overshoot the rule above leaves behind'
+        ? 'What the rules above leave sitting on hand'
         : 'Where the position ends the bucket',
     );
   }
