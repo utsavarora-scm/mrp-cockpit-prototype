@@ -769,17 +769,27 @@ export function explain(
     itemId,
     plantId,
     anchor: window === undefined ? null : { row: anchor.row ?? null, label: window.label, week: window.week },
-    // A weekly cell gets a weekly sentence. Leading it with one order's
-    // quantity is what put "Order 6,656 EA" above a total of 52,793 EA.
+    // A cell gets a sentence about that cell.
+    //
+    // A weekly one is written in quantities — leading it with one order's
+    // quantity is what put "Order 6,656 EA" above a total of 52,793 EA. A daily
+    // one describes its own order where it has one, and where it has none it
+    // says so rather than reaching for the material's first recommendation
+    // anywhere in the horizon, which is how a cell dated 21 Sept came to be
+    // introduced by an order landing 19 Oct.
     sentence:
-      window !== undefined && window.label === window.week
-        ? buildWeekSentence(facts, context, window)
-        : buildSentence(facts, context, order, biteDay),
+      window === undefined
+        ? buildSentence(facts, context, order, biteDay)
+        : window.label === window.week
+          ? buildWeekSentence(facts, context, window)
+          : anchoredOrder !== null
+            ? buildSentence(facts, context, anchoredOrder, biteDay)
+            : buildDaySentence(facts, context, window, explanations),
     arithmetic:
       window === undefined || anchor.row === undefined
         ? buildArithmetic(facts, context, order)
         : buildCellArithmetic(facts, context, anchor.row, window, anchoredOrder),
-    chain: buildChainWalk(facts, context, order),
+    chain: buildChainWalk(facts, context, order, window),
     provenance: buildProvenance(facts, context),
     categoryCheck: facts.categorySiblings.map((sibling) => ({
       itemId: sibling.itemId,
@@ -868,6 +878,49 @@ function buildSentence(
     lotClause +
     reachClause
   );
+}
+
+/**
+ * One sentence for a daily cell the run proposes nothing in.
+ *
+ * Most cells are this: demand lands, the position absorbs it, and no order is
+ * raised. The panel still has to say what the cell *is*, and the one thing it
+ * must not do is borrow a recommendation from somewhere else in the horizon and
+ * present it as this cell's story.
+ */
+function buildDaySentence(
+  facts: MaterialFacts,
+  context: RunContext,
+  window: CellWindow,
+  explanations: PlannedOrderExplanation[],
+): string {
+  const uom = facts.baseUom;
+  const when = formatDateWithWeekday(fromEpochDay(context.planningEpochDay + window.startDay));
+  const gross = facts.plan.grossRequirements[window.startDay] as number;
+  const split = splitDemand(facts, context, context.horizonDays);
+  const dependent = split.dependent[window.startDay] as number;
+  const independent = split.independent[window.startDay] as number;
+
+  const origin =
+    independent <= 0.5
+      ? 'all of it exploded from the parents that consume it'
+      : dependent <= 0.5
+        ? 'all of it independent demand'
+        : `${format(independent)} ${uom} of it independent demand and ${format(dependent)} ${uom} exploded from its parents`;
+
+  const head =
+    gross > 0.5
+      ? `${when} needs ${format(gross)} ${uom} of ${facts.itemId} (${facts.description}), ${origin}.`
+      : `${when} needs nothing of ${facts.itemId} (${facts.description}).`;
+
+  const next = explanations.find((row) => toEpochDay(row.receiptDate) - context.planningEpochDay > window.endDay);
+
+  const tail =
+    next === undefined
+      ? ' This run proposes no receipt on this day, and none after it.'
+      : ` This run proposes no receipt on this day; its next is ${format(next.qty)} ${uom} landing ${formatDateWithWeekday(next.receiptDate)}.`;
+
+  return head + tail;
 }
 
 /**
@@ -1051,12 +1104,33 @@ function buildCellArithmetic(
     case 'gross':
     case 'independent':
     case 'dependent': {
-      const independent = flow(facts.plan.underlyingDemand);
+      // The same split the grid rows are drawn from, rather than a second one
+      // derived here.
+      //
+      // This block used to read `underlyingDemand` and call it the independent
+      // share, inferring the dependent share as `gross − underlying`. But
+      // `underlyingDemand` is not the independent part of the demand: it is the
+      // *whole* of it exploded with no lead-time offsetting and no lot sizing,
+      // a parallel smoothing kept for reasoning about variability. Subtracting
+      // it from gross compares two schedulings of the same requirement, which
+      // on a raw material with no independent demand at all reported 89 MT from
+      // the production schedule and −1 MT from the bill of material, against a
+      // grid row showing a dash.
+      const split = splitDemand(facts, context, context.horizonDays);
+      const independent = flow(split.independent);
+      const dependent = flow(split.dependent);
       const gross = flow(facts.plan.grossRequirements);
+
       push(`Independent demand, ${where}`, independent, '', 'Production schedule and customer orders');
-      push('From bill-of-material explosion', gross - independent, '+', 'Aggregated across every parent', {
+      push('From bill-of-material explosion', dependent, '+', 'Aggregated across every parent', {
         expandable: true,
       });
+      // Consumption and rounding can leave the two shares a hair off the total
+      // they are shares of. Named rather than absorbed into either one.
+      const unreconciled = gross - independent - dependent;
+      if (Math.abs(unreconciled) >= 0.5) {
+        push('Netted against forecast', unreconciled, '+', 'Consumed by orders already counted');
+      }
       push('Gross requirement', gross, '=', null, { emphasis: true });
       return lines;
     }
@@ -1462,9 +1536,30 @@ function lowestBalance(facts: MaterialFacts, context: RunContext): number {
  * conversation with formulation, a stage yield is a conversation with the
  * plant, and they are not the same conversation.
  */
-function buildChainWalk(facts: MaterialFacts, context: RunContext, order: PlannedOrderExplanation | null): ChainStep[] {
-  const day = order ? order.requirementDay : Math.max(facts.firstBreachDay, 0);
-  const target = facts.plan.grossRequirements[day] as number;
+function buildChainWalk(
+  facts: MaterialFacts,
+  context: RunContext,
+  order: PlannedOrderExplanation | null,
+  window?: CellWindow,
+): ChainStep[] {
+  // Anchored to a cell, the walk explains *that* cell — the quantity the reader
+  // is looking at, over the bucket they opened.
+  //
+  // It used to start from the anchored order, and where a cell had no order it
+  // fell back to the material's first recommendation anywhere in the horizon.
+  // That put a 136 MT walk under a cell reading 88 MT, deriving a requirement
+  // dated four weeks later than the column it was sitting in.
+  let target: number;
+  if (window !== undefined) {
+    let sum = 0;
+    for (let day = window.startDay; day <= window.endDay; day += 1) {
+      sum += facts.plan.grossRequirements[day] as number;
+    }
+    target = sum;
+  } else {
+    const day = order ? order.requirementDay : Math.max(facts.firstBreachDay, 0);
+    target = facts.plan.grossRequirements[day] as number;
+  }
   if (target <= 0) return [];
 
   // Walk up: find the parents that consume this material, and their own
