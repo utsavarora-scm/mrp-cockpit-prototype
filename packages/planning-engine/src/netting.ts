@@ -233,11 +233,13 @@ export function netItemPlant(input: NettingInput): NettingResult {
   let firstStockoutDay = -1;
   let firstBreachDay = -1;
   const netRequirements = new Float64Array(horizonDays + 1);
-  // The shortfall already reported in the run of buckets currently below the
-  // threshold. Without it, a gap that persists for nine days is written out
-  // nine times and a weekly bucket reports seven times the requirement — the
-  // series has to be summable, because the grid sums it.
-  let reportedShortfall = 0;
+  // The shortfall still standing uncovered at the close of the previous
+  // bucket. Without it, a gap that persists for nine days is written out nine
+  // times and a weekly bucket reports seven times the requirement — the series
+  // has to be summable, because the grid sums it. Carried across the *close*
+  // of each bucket rather than its opening, so a gap an order closed is not
+  // still counted as covered ground on the day after.
+  let uncoveredShortfall = 0;
   let balance = openingStock;
   // The same walk, minus any receipt whose release date has already passed.
   let feasibleBalance = openingStock;
@@ -256,15 +258,13 @@ export function netItemPlant(input: NettingInput): NettingResult {
     if (firstBreachDay === -1 && balance < threshold - EPSILON) firstBreachDay = day;
 
     if (balance < threshold - EPSILON) {
-      // Only the growth in the gap, so the series sums across a bucket. Where
-      // an order is raised the balance is topped back up and the next day's
-      // growth is naturally zero; where one cannot be, this is what stops the
-      // same shortfall being counted every day until supply arrives.
+      // Only the growth on top of the gap still standing, so the series sums
+      // across a bucket. Where an order was raised yesterday the balance was
+      // topped back up, nothing is standing, and today's shortfall is reported
+      // in full; where one could not be, this is what stops the same shortfall
+      // being counted every day until supply arrives.
       const required = threshold - balance;
-      netRequirements[day] = Math.max(0, required - reportedShortfall);
-      reportedShortfall = Math.max(reportedShortfall, required);
-    } else {
-      reportedShortfall = 0;
+      netRequirements[day] = Math.max(0, required - uncoveredShortfall);
     }
 
     if (planningActive && balance < threshold - EPSILON && orders.length < MAX_ORDERS_PER_ITEM_PLANT) {
@@ -350,6 +350,14 @@ export function netItemPlant(input: NettingInput): NettingResult {
         }
       }
     }
+
+    // What this bucket leaves behind, measured after any order it raised.
+    //
+    // A shortfall an order covered is closed, not carried: the next bucket's
+    // gap is a fresh requirement, not growth in this one. Reading it off the
+    // closing balance also lets a partial recovery widen again and be
+    // reported, which a high-water mark would swallow.
+    uncoveredShortfall = balance < threshold - EPSILON ? threshold - balance : 0;
 
     projectedAvailable[day] = balance;
     projectedAvailableFeasible[day] = feasibleBalance;

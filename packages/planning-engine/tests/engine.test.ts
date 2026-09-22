@@ -502,6 +502,62 @@ describe('netting does not look ahead', () => {
     expect(week).toBeCloseTo(70, 6);
   });
 
+  it('reports the full requirement again once an order has closed the gap', () => {
+    // The twin of the case above, and the one that matters more, because it is
+    // the ordinary one: planning *is* active, so every day's shortfall is
+    // served and the balance is topped back up to the threshold. Topped up to
+    // exactly the threshold — so the next day's demand puts it under again.
+    //
+    // A carry that only clears when the balance climbs back above the norm
+    // therefore never clears at all, and the row degenerates into the
+    // day-over-day change in demand: a 30-a-day material reports 30 once and
+    // then nothing, while the orders beside it ask for 30 every day.
+    const base = snapshot({
+      items: [item({ id: 'X' })],
+      itemPlants: [itemPlant({ itemId: 'X', plantId: 'P1', safetyStock: 100, leadTimeDays: 0 })],
+      stock: [stock('X', 'P1', 100)],
+      demand: dailyDemand('X', 'P1', 30, 0, 6),
+    });
+
+    const plan = runMrp(base, options());
+    const item_ = plan.plans.get('X@P1');
+    const series = item_?.netRequirements as Float64Array;
+    const receipts = item_?.plannedReceipts as Float64Array;
+
+    // Opening stock sits exactly on the norm, so each day needs its own 30.
+    for (let day = 0; day <= 6; day += 1) expect(series[day]).toBeCloseTo(30, 6);
+
+    // And the row reconciles with what the plan proposes beside it, which is
+    // the property a planner actually reads the two rows for.
+    for (let day = 0; day <= 6; day += 1) {
+      expect(series[day]).toBeCloseTo(receipts[day] as number, 6);
+    }
+  });
+
+  it('reports a gap that widens after a partial recovery', () => {
+    // Between the two: nothing can be ordered, but a scheduled receipt closes
+    // part of the gap before demand widens it again. A high-water mark would
+    // swallow the second widening; the standing shortfall does not.
+    const base = snapshot({
+      items: [item({ id: 'X' })],
+      itemPlants: [
+        itemPlant({ itemId: 'X', plantId: 'P1', safetyStock: 100, leadTimeDays: 10, isPlanningRelevant: false }),
+      ],
+      stock: [stock('X', 'P1', 100)],
+      demand: dailyDemand('X', 'P1', 20, 0, 3),
+      supply: [supply({ id: 'PO-1', itemId: 'X', plantId: 'P1', qty: 50, dueDate: addDays(PLANNING_DATE, 2) })],
+    });
+
+    const plan = runMrp(base, options());
+    const series = plan.plans.get('X@P1')?.netRequirements as Float64Array;
+
+    // 100 → 80 (gap 20) → 60 (gap 40) → 90 on the receipt (gap 10) → 70 (gap 30).
+    expect(series[0]).toBeCloseTo(20, 6);
+    expect(series[1]).toBeCloseTo(20, 6);
+    expect(series[2]).toBeCloseTo(0, 6);
+    expect(series[3]).toBeCloseTo(20, 6);
+  });
+
   it('still raises an order when the gap goes negative before supply arrives', () => {
     const base = snapshot({
       items: [item({ id: 'X' })],
