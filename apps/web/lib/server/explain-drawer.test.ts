@@ -36,7 +36,7 @@ describe('the explain drawer', () => {
     expect(total?.value).toBeCloseTo(52793, 0);
 
     // And the components foot to it, which is what the panel promises.
-    const parts = payload!.arithmetic.filter((row) => row.label.startsWith('Release '));
+    const parts = payload!.arithmetic.filter((row) => row.label.startsWith('Of which released in '));
     expect(parts).toHaveLength(2);
     expect(parts.reduce((sum, row) => sum + (row.value ?? 0), 0)).toBeCloseTo(52793, 0);
   });
@@ -55,9 +55,9 @@ describe('the explain drawer', () => {
     const rows = weekly('plannedReceipt')!.arithmetic;
 
     // Two of the six had to go out in W35, which is behind us.
-    const past = line(rows, 'Release W35');
+    const past = line(rows, 'Of which released in W35');
     expect(past?.value).toBeCloseTo(15633, 0);
-    expect(line(rows, 'Release W36')?.value).toBeCloseTo(37160, 0);
+    expect(line(rows, 'Of which released in W36')?.value).toBeCloseTo(37160, 0);
     expect(line(rows, 'of which cannot be placed in time')?.value).toBeCloseTo(15633, 0);
   });
 
@@ -144,6 +144,47 @@ describe('the explain drawer', () => {
   it('still leads with the recommendation on a day that has one', () => {
     const sentence = explain('baseline', 'RM-30112', 'M014', { row: 'gross', fromDate: '2026-10-19' })!.sentence;
     expect(sentence).toMatch(/^Order 250 MT/);
+  });
+
+  it('carries the ladder through lot sizing, so the chain has a line to land on', () => {
+    // PM-88467 in W49: a 36,214 EA shortfall met by a 600,000 EA minimum. The
+    // chain below the panel derives the *gross requirement*, so that figure has
+    // to be on screen — the block used to open at the order total, leaving the
+    // 206,496 EA the chain ends at with nothing to attach to.
+    const payload = explain('baseline', 'PM-88467', 'M014', {
+      row: 'plannedReceipt',
+      fromDate: '2026-11-30',
+      toDate: '2026-12-06',
+    });
+    const rows = payload!.arithmetic;
+
+    const gross = line(rows, 'Gross requirement')?.value ?? 0;
+    const net = line(rows, 'NET REQUIREMENT')?.value ?? 0;
+    const added = line(rows, 'Added by a rule rather than by demand')?.value ?? 0;
+    const total = line(rows, 'PLANNED ORDER RECEIPT')?.value ?? 0;
+
+    expect(gross).toBeCloseTo(206496, 0);
+    expect(net).toBeCloseTo(36214, 0);
+    expect(net + added).toBeCloseTo(total, 0);
+    expect(total).toBeCloseTo(600000, 0);
+
+    // And the chain lands exactly on the top of the ladder.
+    expect(payload!.chain[payload!.chain.length - 1]?.resultQty).toBeCloseTo(gross, 0);
+  });
+
+  it('says a bucket opening past the fence is reachable throughout', () => {
+    // W49 opens 30 November; the 21-day fence cleared in September. The date
+    // shown is the bucket's own first day, so the note must not claim it is
+    // "21 days from today".
+    const rows = explain('baseline', 'PM-88467', 'M014', {
+      row: 'plannedReceipt',
+      fromDate: '2026-11-30',
+      toDate: '2026-12-06',
+    })!.arithmetic;
+
+    const earliest = rows.find((row) => row.label.startsWith('EARLIEST ACHIEVABLE'));
+    expect(earliest?.label).toContain('Mon 30 Nov');
+    expect(earliest?.source).toContain('opens after the fence');
   });
 
   it('reconciles the net requirement row against the walk that sized it', () => {

@@ -454,23 +454,6 @@ function groupByReleaseWeek(
 }
 
 /**
- * The earliest this bucket could receive anything, under this run's lead time.
- *
- * The fence is a material-level date — the first day an order released today
- * could land — so a bucket that opens after it is reachable from its first day,
- * one that closes before it cannot be reached at all, and one that straddles it
- * is reachable from the fence onwards. Answering with a single order's receipt
- * date instead is what made a weekly cell quote one day out of six.
- */
-function earliestWithin(facts: MaterialFacts, context: RunContext, window: CellWindow): string | null {
-  const fence = facts.fences.maintained.earliestReceiptDate;
-  const start = fromEpochDay(context.planningEpochDay + window.startDay);
-  const end = fromEpochDay(context.planningEpochDay + window.endDay);
-  if (fence > end) return null;
-  return fence < start ? start : fence;
-}
-
-/**
  * Independent demand against dependent, per bucket.
  *
  * Worth splitting because they are argued about with different people. An
@@ -1186,68 +1169,8 @@ function buildCellArithmetic(
       return lines;
     }
 
-    case 'netRequirement': {
-      const gross = flow(facts.plan.grossRequirements);
-      const receipts = flow(facts.plan.scheduledReceipts);
-      const threshold = facts.plan.safetyStock;
-      const required = gross + threshold;
-
-      // Two balances enter this bucket, and naming only one of them is what
-      // made this panel impossible to read. The curve the grid plots above is
-      // the position on stock and existing orders alone; the walk that raised
-      // this requirement had already topped that curve up with every order it
-      // proposed earlier in the horizon. Netting sized the requirement against
-      // the second, so the second is what the subtraction has to use — and the
-      // orders standing between the two are a line of their own rather than a
-      // silent 15,633 EA step the reader is left to discover.
-      const standing = opening(facts.plan.projectedBeforePlanned);
-      const entering = opening(facts.plan.projectedAvailable);
-      const proposed = entering - standing;
-      const available = entering + receipts;
-
-      push(`Gross requirement, ${where}`, gross, '', 'Bill-of-material explosion', { expandable: true });
-      push('Safety stock', threshold, '+', `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`);
-      push('Required position', required, '=', null, { emphasis: true });
-
-      if (Math.abs(proposed) < 1) {
-        // Nothing proposed yet, so the two curves agree and splitting them
-        // would be three lines saying one thing.
-        push(`Balance entering ${when}`, entering, '', 'Rolled from opening stock', { expandable: true });
-      } else {
-        push(`On stock and existing orders, entering ${when}`, standing, '', 'Rolled from opening stock', {
-          expandable: true,
-        });
-        push('Planned orders already raised', proposed, '+', 'Proposed earlier in this run');
-        push(`Balance entering ${when}`, entering, '=', null);
-      }
-      push('Scheduled receipts', receipts, '+', 'Open purchase order schedule lines');
-      push('Available position', available, '=', null, { emphasis: true });
-
-      const shortfall = required - available;
-      const net = flow(facts.plan.netRequirements);
-      const residual = net - shortfall;
-
-      if (Math.abs(residual) < 1) {
-        push('NET REQUIREMENT', net, '=', 'Required position less available position', { emphasis: true });
-      } else {
-        // Across a week the walk tops the balance up bucket by bucket and can
-        // finish somewhere other than exactly on the norm — lot sizing rounding
-        // a quantity up, or a receipt landing mid-week. That difference is the
-        // entire gap between the week's shortfall and the week's requirement,
-        // so it gets named. A daily cell almost never reaches this branch: the
-        // walk tops up to the norm and stops.
-        const above = residual >= 0;
-        push('Shortfall against norm', shortfall, '=', null);
-        push(
-          above ? `Closes ${when} above norm by` : `Left uncovered at the close of ${when}`,
-          Math.abs(residual),
-          above ? '+' : '−',
-          above ? 'Lot sizing and receipt timing' : 'More than this run could order in time',
-        );
-        push('NET REQUIREMENT', net, '=', 'Summed from the daily netting walk', { emphasis: true });
-      }
-      return lines;
-    }
+    case 'netRequirement':
+      return requirementLadder(facts, bucket, where, when).lines;
 
     default: {
       // Rows 10 to 12 *are* the recommendation, so they get its full working —
@@ -1255,10 +1178,117 @@ function buildCellArithmetic(
       // cell are therefore the same thing. Across a week they are not: six
       // receipts sum into one cell, and handing that cell the first of them
       // explained 6,656 EA under a total of 52,793 EA.
-      if (!isDaily) return buildWeeklyReceiptArithmetic(facts, context, bucket);
+      if (!isDaily) return buildWeeklyReceiptArithmetic(facts, context, bucket, where, when);
       return buildArithmetic(facts, context, order);
     }
   }
+}
+
+/**
+ * Requirement, position, and the shortfall between them, for one bucket.
+ *
+ * Shared by the net requirement cell and the planned order receipt cell,
+ * because they are the same ladder read to different heights: the first stops
+ * at the shortfall, the second carries on through lot sizing to the quantity
+ * that will actually be ordered. Built once so the two can never disagree —
+ * and so the chain walk below the panel, which derives the gross requirement,
+ * always has the line it derives on screen to land on.
+ */
+function requirementLadder(
+  facts: MaterialFacts,
+  bucket: CellWindow,
+  where: string,
+  when: string,
+): { lines: ExplainLine[]; net: number } {
+  const uom = facts.baseUom;
+  const lines: ExplainLine[] = [];
+  const push = (
+    label: string,
+    value: number | null,
+    operator: ExplainLine['operator'],
+    source: string | null,
+    options: { emphasis?: boolean; expandable?: boolean } = {},
+  ): void => {
+    lines.push({
+      label,
+      value: value === null ? null : round(value),
+      uom,
+      operator,
+      source,
+      emphasis: options.emphasis ?? false,
+      expandable: options.expandable ?? false,
+    });
+  };
+
+  const flow = (series: Float64Array): number => {
+    let total = 0;
+    for (let day = bucket.startDay; day <= bucket.endDay; day += 1) total += series[day] as number;
+    return total;
+  };
+  const opening = (series: Float64Array): number =>
+    bucket.startDay === 0 ? facts.plan.openingStock : (series[bucket.startDay - 1] as number);
+
+  const gross = flow(facts.plan.grossRequirements);
+  const receipts = flow(facts.plan.scheduledReceipts);
+  const threshold = facts.plan.safetyStock;
+  const required = gross + threshold;
+
+  // Two balances enter this bucket, and naming only one of them is what made
+  // this panel impossible to read. The curve the grid plots above is the
+  // position on stock and existing orders alone; the walk that raised this
+  // requirement had already topped that curve up with every order it proposed
+  // earlier in the horizon. Netting sized the requirement against the second,
+  // so the second is what the subtraction has to use — and the orders standing
+  // between the two are a line of their own rather than a silent step the
+  // reader is left to discover.
+  const standing = opening(facts.plan.projectedBeforePlanned);
+  const entering = opening(facts.plan.projectedAvailable);
+  const proposed = entering - standing;
+  const available = entering + receipts;
+
+  push(`Gross requirement, ${where}`, gross, '', 'Bill-of-material explosion', { expandable: true });
+  push('Safety stock', threshold, '+', `SAP material master, set ${facts.itemPlant.paramsLastChangedOn}`);
+  push('Required position', required, '=', null, { emphasis: true });
+
+  if (Math.abs(proposed) < 1) {
+    // Nothing proposed yet, so the two curves agree and splitting them would be
+    // three lines saying one thing.
+    push(`Balance entering ${when}`, entering, '', 'Rolled from opening stock', { expandable: true });
+  } else {
+    push(`On stock and existing orders, entering ${when}`, standing, '', 'Rolled from opening stock', {
+      expandable: true,
+    });
+    push('Planned orders already raised', proposed, '+', 'Proposed earlier in this run');
+    push(`Balance entering ${when}`, entering, '=', null);
+  }
+  push('Scheduled receipts', receipts, '+', 'Open purchase order schedule lines');
+  push('Available position', available, '=', null, { emphasis: true });
+
+  const shortfall = required - available;
+  const net = flow(facts.plan.netRequirements);
+  const residual = net - shortfall;
+
+  if (Math.abs(residual) < 1) {
+    push('NET REQUIREMENT', net, '=', 'Required position less available position', { emphasis: true });
+  } else {
+    // Across a week the walk tops the balance up bucket by bucket and can
+    // finish somewhere other than exactly on the norm — lot sizing rounding a
+    // quantity up, or a receipt landing mid-week. That difference is the entire
+    // gap between the week's shortfall and the week's requirement, so it gets
+    // named. A daily cell almost never reaches this branch: the walk tops up to
+    // the norm and stops.
+    const above = residual >= 0;
+    push('Shortfall against norm', shortfall, '=', null);
+    push(
+      above ? `Closes ${when} above norm by` : `Left uncovered at the close of ${when}`,
+      Math.abs(residual),
+      above ? '+' : '−',
+      above ? 'Lot sizing and receipt timing' : 'More than this run could order in time',
+    );
+    push('NET REQUIREMENT', net, '=', 'Summed from the daily netting walk', { emphasis: true });
+  }
+
+  return { lines, net };
 }
 
 /**
@@ -1270,9 +1300,16 @@ function buildCellArithmetic(
  * count rides along in the source column, where it informs without pretending
  * to be the quantity.
  */
-function buildWeeklyReceiptArithmetic(facts: MaterialFacts, context: RunContext, bucket: CellWindow): ExplainLine[] {
+function buildWeeklyReceiptArithmetic(
+  facts: MaterialFacts,
+  context: RunContext,
+  bucket: CellWindow,
+  where: string,
+  when: string,
+): ExplainLine[] {
   const uom = facts.baseUom;
-  const lines: ExplainLine[] = [];
+  const ladder = requirementLadder(facts, bucket, where, when);
+  const lines: ExplainLine[] = [...ladder.lines];
   const push = (
     label: string,
     value: number | null,
@@ -1295,58 +1332,92 @@ function buildWeeklyReceiptArithmetic(facts: MaterialFacts, context: RunContext,
   const groups = groupByReleaseWeek(explanations, context, bucket);
 
   if (groups.length === 0) {
-    push(`Planned order receipt, ${bucket.week}`, 0, '', 'This run proposes nothing in this bucket', true);
+    push('PLANNED ORDER RECEIPT', 0, '=', 'This run proposes nothing in this bucket', true);
     return lines;
   }
 
   let total = 0;
-  let added = 0;
   let unreachable = 0;
-  for (let index = 0; index < groups.length; index += 1) {
-    const group = groups[index] as ReleaseGroup;
+  for (const group of groups) {
     total += group.qty;
-    added += group.addedByLotSizing;
     if (group.isPast) unreachable += group.qty;
+  }
 
+  // From the shortfall to the quantity that will actually be ordered.
+  //
+  // The step between them is the whole of lot sizing, and it is usually the
+  // larger number: a 36,214 EA gap met by a 600,000 EA minimum is 94% rule and
+  // 6% demand. Carrying the ladder through to the order is what lets the chain
+  // walk underneath — which derives the gross requirement at the top of it —
+  // reach the total at the bottom without the reader having to bridge it.
+  const added = total - ladder.net;
+  if (Math.abs(added) >= 0.5) {
+    push(
+      'Added by a rule rather than by demand',
+      added,
+      '+',
+      'The minimum, the rounding value and the maximum lot, in that order',
+    );
+  }
+  push('PLANNED ORDER RECEIPT', total, '=', null, true);
+
+  // The same total, restated by the week it has to go out in. A restatement
+  // rather than a further sum, so it carries no operator.
+  for (const group of groups) {
     const parcels = `${group.parcels} ${group.parcels === 1 ? 'order' : 'orders'}`;
     push(
-      `Release ${group.week}${group.isPast ? ' — already past' : ''}`,
+      `Of which released in ${group.week}${group.isPast ? ' — already past' : ''}`,
       group.qty,
-      index === 0 ? '' : '+',
+      '',
       group.isPast
         ? `${parcels}, and cannot now be placed in time`
         : `${parcels}, released by ${formatDateWithWeekday(group.releaseDate)}`,
     );
   }
-
-  push('PLANNED ORDER RECEIPT', total, '=', null, true);
-  if (added > 0) {
-    push('of which added by a rule rather than by demand', added, '', 'Need and rule are never merged');
-  }
   if (unreachable > 0) {
     push('of which cannot be placed in time', unreachable, '', 'Its release week has already passed');
   }
 
+  const leadDays = facts.fences.maintained.totalDays;
   push(
-    `Lead time ${facts.fences.maintained.totalDays} ${facts.fences.maintained.totalDays === 1 ? 'day' : 'days'}`,
+    `Lead time ${leadDays} ${leadDays === 1 ? 'day' : 'days'}`,
     null,
     '',
     'Vendor response, readiness, transit, customs, receipt and quality release',
   );
 
   // The earliest anything could land *inside this bucket*, not one order's
-  // receipt date. A week that closes before the fence cannot be reached at all,
-  // and says so rather than quoting a date outside itself.
-  const earliest = earliestWithin(facts, context, bucket);
-  push(
-    earliest === null ? `NOTHING CAN LAND IN ${bucket.week}` : `EARLIEST ACHIEVABLE ${formatDateWithWeekday(earliest)}`,
-    null,
-    '',
-    earliest === null
-      ? `The lead-time fence clears on ${formatDateWithWeekday(facts.fences.maintained.earliestReceiptDate)}, after this bucket closes`
-      : `${facts.fences.maintained.totalDays} ${facts.fences.maintained.totalDays === 1 ? 'day' : 'days'} from today, walked over the working calendar`,
-    true,
-  );
+  // receipt date, and described by whichever of the three cases it is: the
+  // fence falls before the bucket, inside it, or after it closes.
+  const fence = facts.fences.maintained.earliestReceiptDate;
+  const start = fromEpochDay(context.planningEpochDay + bucket.startDay);
+  const end = fromEpochDay(context.planningEpochDay + bucket.endDay);
+
+  if (fence > end) {
+    push(
+      `NOTHING CAN LAND IN ${bucket.week}`,
+      null,
+      '',
+      `The lead-time fence clears on ${formatDateWithWeekday(fence)}, after this bucket closes`,
+      true,
+    );
+  } else if (fence < start) {
+    push(
+      `EARLIEST ACHIEVABLE ${formatDateWithWeekday(start)}`,
+      null,
+      '',
+      `This bucket opens after the fence, which cleared on ${formatDateWithWeekday(fence)} — any day in it is reachable`,
+      true,
+    );
+  } else {
+    push(
+      `EARLIEST ACHIEVABLE ${formatDateWithWeekday(fence)}`,
+      null,
+      '',
+      `${leadDays} ${leadDays === 1 ? 'day' : 'days'} from today, walked over the working calendar`,
+      true,
+    );
+  }
 
   return lines;
 }
