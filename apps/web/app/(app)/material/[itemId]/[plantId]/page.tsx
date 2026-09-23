@@ -24,6 +24,7 @@ import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import { useState } from 'react';
 
+import { LoadError } from '@/components/general/LoadError';
 import type { MaterialDetail } from '@/lib/api-types';
 import { ExplainDrawer } from '@/components/planning/ExplainDrawer';
 import type { GridAnchor } from '@/components/planning/PlanningGrid';
@@ -74,16 +75,16 @@ export default function MaterialPage() {
     },
   });
 
-  if (query.isError) {
+  if (query.isError && !query.data) {
     return (
       <Shell>
-        <div className='bg-card rounded-lg border p-8'>
-          <p className='text-[14px] font-medium'>That material could not be loaded.</p>
-          <p className='text-muted-foreground mt-1 text-[13px]'>It may not be planned at this plant.</p>
-          <Link href='/' className='text-primary mt-4 inline-block text-[13px] font-medium hover:underline'>
-            Back to the planning position
-          </Link>
-        </div>
+        <LoadError
+          message='That material could not be loaded.'
+          detail='It may not be planned at this plant, or the request failed.'
+          onRetry={() => void query.refetch()}
+          retrying={query.isFetching}
+          back={{ href: '/', label: 'Back to the planning position' }}
+        />
       </Shell>
     );
   }

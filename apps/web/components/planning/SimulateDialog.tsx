@@ -22,6 +22,7 @@ import { ArrowRight } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 
+import { LoadError } from '@/components/general/LoadError';
 import type { MaterialDetail, SimulationView } from '@/lib/api-types';
 
 const FIELDS = [
@@ -272,6 +273,17 @@ export function SimulateDialog({ detail }: { detail: MaterialDetail }) {
               {simulation.data.beforeFence.earliestReceiptWeek} to {simulation.data.afterFence.earliestReceiptWeek}.
             </p>
           </div>
+        ) : simulation.isError ? (
+          <div className='mt-4'>
+            <LoadError
+              message='That change could not be simulated.'
+              detail='Nothing has been committed. Try again, or change the value.'
+              onRetry={() => void simulation.refetch()}
+              retrying={simulation.isFetching}
+            />
+          </div>
+        ) : value !== '' && !valid ? (
+          <p className='text-muted-foreground mt-4 text-[13px]'>Enter a number to see the consequence.</p>
         ) : value !== '' ? (
           <p className='text-muted-foreground mt-4 text-[13px]'>Re-planning…</p>
         ) : (

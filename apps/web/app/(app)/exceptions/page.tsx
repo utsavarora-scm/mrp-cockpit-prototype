@@ -22,6 +22,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { toast } from 'sonner';
 
+import { LoadError } from '@/components/general/LoadError';
 import type { ExceptionQueueView, ExceptionView } from '@/lib/api-types';
 import { useViewState } from '@/lib/view-state';
 
@@ -39,6 +40,18 @@ export default function ExceptionsPage() {
       return response.json();
     },
   });
+
+  if (query.isError && !query.data) {
+    return (
+      <Shell>
+        <LoadError
+          message='The exception queue could not be loaded.'
+          onRetry={() => void query.refetch()}
+          retrying={query.isFetching}
+        />
+      </Shell>
+    );
+  }
 
   if (!query.data) {
     return (

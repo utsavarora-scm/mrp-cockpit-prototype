@@ -17,6 +17,7 @@ import { formatCurrency, formatNumber, formatPercent } from '@repo/domain';
 import { Skeleton } from '@repo/ui/components/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@repo/ui/components/tabs';
 
+import { LoadError } from '@/components/general/LoadError';
 import { CaptureDialog } from '@/components/adherence/CaptureDialog';
 import { cn } from '@repo/ui/lib/utils';
 import { useQuery } from '@tanstack/react-query';
@@ -40,6 +41,18 @@ export default function AdherencePage() {
       return response.json();
     },
   });
+
+  if (query.isError && !query.data) {
+    return (
+      <Shell>
+        <LoadError
+          message='Adherence could not be loaded.'
+          onRetry={() => void query.refetch()}
+          retrying={query.isFetching}
+        />
+      </Shell>
+    );
+  }
 
   if (!query.data) {
     return (

@@ -21,6 +21,7 @@ import { ArrowDownRight, Search } from 'lucide-react';
 import Link from 'next/link';
 import { useState } from 'react';
 
+import { LoadError } from '@/components/general/LoadError';
 import type { DriftRow, PlanningPosition, PositionRow, PositionTile } from '@/lib/api-types';
 import { TierBadge } from '@/components/planning/TierBadge';
 import { useViewState } from '@/lib/view-state';
@@ -42,6 +43,18 @@ export default function PositionPage() {
       return response.json();
     },
   });
+
+  if (query.isError && !query.data) {
+    return (
+      <Shell>
+        <LoadError
+          message='The planning position could not be loaded.'
+          onRetry={() => void query.refetch()}
+          retrying={query.isFetching}
+        />
+      </Shell>
+    );
+  }
 
   if (!query.data) {
     return (

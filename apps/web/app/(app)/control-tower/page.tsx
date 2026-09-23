@@ -18,6 +18,7 @@ import { Skeleton } from '@repo/ui/components/skeleton';
 import { cn } from '@repo/ui/lib/utils';
 import { useQuery } from '@tanstack/react-query';
 
+import { LoadError } from '@/components/general/LoadError';
 import type { ControlTowerView } from '@/lib/api-types';
 import { useViewState } from '@/lib/view-state';
 
@@ -34,6 +35,18 @@ export default function ControlTowerPage() {
       return response.json();
     },
   });
+
+  if (query.isError && !query.data) {
+    return (
+      <Shell>
+        <LoadError
+          message='The control tower could not be loaded.'
+          onRetry={() => void query.refetch()}
+          retrying={query.isFetching}
+        />
+      </Shell>
+    );
+  }
 
   if (!query.data) {
     return (

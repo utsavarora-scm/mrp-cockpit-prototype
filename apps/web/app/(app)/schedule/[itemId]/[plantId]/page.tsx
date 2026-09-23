@@ -23,6 +23,7 @@ import { useParams } from 'next/navigation';
 import { useState } from 'react';
 import { toast } from 'sonner';
 
+import { LoadError } from '@/components/general/LoadError';
 import type { DeliveryLineView, SchedulePayloadView, ScheduleBuilderView, ScheduleLineView } from '@/lib/api-types';
 import { DeliveryLedger } from '@/components/schedule/DeliveryLedger';
 import { InboundTimeline } from '@/components/schedule/InboundTimeline';
@@ -70,6 +71,22 @@ export default function SchedulePage() {
     },
     onError: (error: Error) => toast.error(error.message),
   });
+
+  if (query.isError && !query.data) {
+    return (
+      <Shell>
+        <LoadError
+          message='That schedule could not be built.'
+          onRetry={() => void query.refetch()}
+          retrying={query.isFetching}
+          back={{
+            href: `/material/${encodeURIComponent(itemId)}/${encodeURIComponent(plantId)}`,
+            label: 'Back to the material',
+          }}
+        />
+      </Shell>
+    );
+  }
 
   if (!query.data) {
     return (

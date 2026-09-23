@@ -90,6 +90,13 @@ export function TopBar() {
 
   const plants = header.data?.plants ?? [];
 
+  // A material or schedule screen is one material at one plant, and the plant
+  // is in its address. The selector shows that plant and stays put there:
+  // changing it would leave a bar saying one plant over a screen showing
+  // another.
+  const scopedPlant = /^\/(?:material|schedule)\/[^/]+\/([^/]+)/.exec(pathname)?.[1];
+  const pagePlant = scopedPlant ? decodeURIComponent(scopedPlant) : null;
+
   return (
     <header className='bg-background/95 sticky top-0 z-30 border-b backdrop-blur'>
       <div className='mx-auto flex h-14 max-w-[1680px] items-center gap-3 px-6'>
@@ -142,12 +149,16 @@ export function TopBar() {
           </Tooltip>
         ) : null}
 
-        <label className='ml-auto flex items-center gap-2'>
+        <label
+          className='ml-auto flex items-center gap-2'
+          title={pagePlant ? 'This screen is for one plant. Go back to the position to change plant.' : undefined}
+        >
           <span className='sr-only'>Plant</span>
           <select
-            value={plantId ?? ''}
+            value={pagePlant ?? plantId ?? ''}
+            disabled={pagePlant !== null}
             onChange={(event) => setPlantId(event.target.value === '' ? null : event.target.value)}
-            className='border-input bg-background hover:bg-muted h-8 rounded-md border px-2 text-[13px] transition-colors'
+            className='border-input bg-background hover:bg-muted h-8 rounded-md border px-2 text-[13px] transition-colors disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:bg-transparent'
           >
             <option value=''>All plants</option>
             {plants.map((plant) => (

@@ -27,6 +27,7 @@ import { cn } from '@repo/ui/lib/utils';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 
+import { LoadError } from '@/components/general/LoadError';
 import type { ChainStep, ExplainLine, ExplainPayload, MaterialDetail } from '@/lib/api-types';
 import type { GridAnchor } from './PlanningGrid';
 
@@ -83,7 +84,18 @@ export function ExplainDrawer({
           </p>
         </SheetHeader>
 
-        {query.data ? <Body payload={query.data} detail={detail} /> : <Loading />}
+        {query.data ? (
+          <Body payload={query.data} detail={detail} />
+        ) : query.isError ? (
+          <LoadError
+            compact
+            message='That could not be explained.'
+            onRetry={() => void query.refetch()}
+            retrying={query.isFetching}
+          />
+        ) : (
+          <Loading />
+        )}
       </SheetContent>
     </Sheet>
   );
