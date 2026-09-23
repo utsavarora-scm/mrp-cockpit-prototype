@@ -58,6 +58,7 @@ export function DeliveryLedger({
                 <Th>Delivery</Th>
                 <Th>Dispatch by</Th>
                 <Th align='right'>Gross demand</Th>
+                <Th align='right'>Already on order</Th>
                 <Th align='right'>Net replenishment need</Th>
                 <Th align='right'>Ideal call-off</Th>
                 <Th align='right'>Committed</Th>
@@ -81,7 +82,7 @@ export function DeliveryLedger({
                 />
               ))}
               <tr className='bg-surface-sunken font-medium'>
-                <td className='grid-cell' colSpan={5}>
+                <td className='grid-cell' colSpan={6}>
                   Total
                 </td>
                 <td className='grid-cell num'>{formatNumber(view.totals.ideal)}</td>
@@ -287,6 +288,11 @@ function ScheduleRow({
         >
           {formatNumber(line.requirement)}
         </Link>
+      </td>
+      {/* Open delivery lines and quality releases landing this week — the
+          same supply the grid nets. The schedule is proposed on top of it. */}
+      <td className='text-muted-foreground grid-cell num'>
+        {line.existingReceipts > 0 ? formatNumber(line.existingReceipts) : '—'}
       </td>
       {/* The base the +N is measured against, which only ever lived in a
           tooltip. Gross demand is the week's requirement; this is what the

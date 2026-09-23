@@ -215,8 +215,12 @@ export function planRecovery(input: RecoveryInput): RecoveryResult {
         { ...input.ceiling, maxLotSize: null },
         {
           qty: largestSlice,
-          // The balance the period opens on, before this day's own demand.
+          // The balance the period opens on, before this day's own demand —
+          // which is also what is on the floor when the receipt arrives. A
+          // recovery is one receipt on one day, so the storage question is
+          // asked at arrival, not after the day's consumption has made room.
           openingBalance: balance + demand,
+          heldAtArrival: balance + demand,
           requirement: demand,
           isShutdownWeek: input.shutdownMondays.has(monday),
         }

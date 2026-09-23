@@ -307,3 +307,24 @@ describe('recovery — measures a planner can check', () => {
     expect(result.recoverableQty).toBeGreaterThan(0);
   });
 });
+
+describe('a single receipt against the warehouse', () => {
+  it('is checked on what is on the floor when it lands, not after the day has consumed', async () => {
+    const { checkReceipt } = await import('../src/receipt-constraints');
+    const ceiling = {
+      weeklyCapacity: null,
+      storageCapacity: 1_000,
+      shelfLifeDays: null,
+      maxLotSize: null,
+      dailyDemandMean: 0,
+    };
+    const args = { qty: 400, openingBalance: 800, requirement: 300, isShutdownWeek: false };
+    // Called off through the period, 800 + 400 − 300 closes at 900 and fits.
+    expect(checkReceipt(ceiling, args).ok).toBe(true);
+    // As one drop, 1,200 would be on the floor before anything is consumed.
+    const verdict = checkReceipt(ceiling, { ...args, heldAtArrival: 800 });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.blockedBy).toBe('STORAGE_CAP');
+    expect(verdict.limit).toBe(200);
+  });
+});

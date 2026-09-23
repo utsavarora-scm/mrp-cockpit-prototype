@@ -80,6 +80,8 @@ export interface IdealLine {
   week: string;
   /** Gross requirement falling in this bucket. */
   requirement: number;
+  /** Supply already on order or in quality that lands in this bucket. */
+  existingReceipts: number;
   /** What the position actually needs to stay at its buffer. */
   needQty: number;
   /** What lot sizing adds on top of the need. Never folded into it. */
@@ -104,6 +106,13 @@ export interface CommittedLine {
   /** qty − idealQty. */
   delta: number;
   balanceAfter: number;
+  /**
+   * The most on the floor from this delivery's arrival to the end of its week
+   * if the whole line came as one drop on its delivery date. The schedule
+   * assumes call-offs through the week, which peak at the closing balance;
+   * this is the figure that says whether one truck would fit instead.
+   */
+  singleDropPeak: number;
   /** The constraint that moved this line, where one did. */
   constraint: ConstraintKey | null;
   /** Written from the constraint objects, never selected from a list of templates. */
@@ -161,7 +170,7 @@ export interface ScheduleViolation {
 export interface ScheduleAdvisory {
   line: number | null;
   week: string | null;
-  kind: 'RESIDUAL_EXPOSURE' | 'INSIDE_FENCE';
+  kind: 'RESIDUAL_EXPOSURE' | 'INSIDE_FENCE' | 'CALL_OFF_REQUIRED';
   message: string;
 }
 
@@ -221,6 +230,13 @@ export interface DeliveryScheduleInput {
   toDay: number;
   /** Daily gross requirement, indexed by day offset from the planning date. */
   grossRequirements: ArrayLike<number>;
+  /**
+   * Supply already coming, by day: open delivery lines and quality releases,
+   * exactly as the grid nets them. The schedule is built *in addition to* this
+   * — without it the builder proposes cover for weeks an open order already
+   * covers, and the grid and the schedule describe two different positions.
+   */
+  scheduledReceipts: ArrayLike<number>;
   /** Balance at the end of the day before `fromDay`. */
   openingBalance: number;
   safetyStock: number;
@@ -305,6 +321,8 @@ interface WeekBucket {
   /** The day a delivery into this week is dated — the first working day of it. */
   deliveryDay: number;
   requirement: number;
+  /** Supply already on order landing in this bucket. */
+  existing: number;
   isShutdown: boolean;
 }
 
@@ -367,7 +385,7 @@ export function buildDeliverySchedule(input: DeliveryScheduleInput): DeliverySch
     ledger: buildLedger(input, ideal, committed, deltas, constraints, bindings, residual),
     options: closingOptions(input, constraints, residual),
     blockingViolations,
-    advisories: findAdvisories(committed, residual),
+    advisories: findAdvisories(input, committed, residual),
     proposedCorrections,
   };
 }
@@ -497,10 +515,15 @@ function weekBuckets(input: DeliveryScheduleInput): WeekBucket[] {
     const endDay = Math.min(mondayDay + 6, input.toDay);
 
     let requirement = 0;
-    for (let index = Math.max(day, 0); index <= endDay; index += 1) requirement += input.grossRequirements[index] ?? 0;
+    let existing = 0;
+    for (let index = Math.max(day, 0); index <= endDay; index += 1) {
+      requirement += input.grossRequirements[index] ?? 0;
+      existing += input.scheduledReceipts[index] ?? 0;
+    }
     // Summed from daily buckets, so the accumulated float error is cleared here
     // rather than allowed to travel into a lot-sizing decision.
     requirement = Math.round(requirement * 1e6) / 1e6;
+    existing = Math.round(existing * 1e6) / 1e6;
 
     // Deliveries are dated to the first day of the week the plant can receive
     // on. A delivery scheduled into a shutdown day is a delivery that will be
@@ -515,6 +538,7 @@ function weekBuckets(input: DeliveryScheduleInput): WeekBucket[] {
       endDay,
       deliveryDay: deliveryEpochDay - input.planningEpochDay,
       requirement,
+      existing,
       isShutdown: shutdowns.has(monday),
     });
 
@@ -522,6 +546,28 @@ function weekBuckets(input: DeliveryScheduleInput): WeekBucket[] {
   }
 
   return buckets;
+}
+
+/**
+ * The most on the floor from the delivery day to the end of the week, were
+ * the whole line to come as one drop.
+ *
+ * Walked day by day: open orders land when they are dated, consumption draws
+ * down after each day's receipts, and the peak is taken only from the delivery
+ * onwards — stock consumed before the truck arrives does not compete with it
+ * for space. A delivery dated past the week's last day (a week the plant
+ * cannot receive in at all) is charged against everything the week leaves.
+ */
+function peakFromDelivery(input: DeliveryScheduleInput, week: WeekBucket, opening: number, qty: number): number {
+  let level = opening;
+  let peak = Number.NEGATIVE_INFINITY;
+  for (let day = Math.max(week.startDay, 0); day <= week.endDay; day += 1) {
+    level += input.scheduledReceipts[day] ?? 0;
+    if (day === week.deliveryDay) level += qty;
+    if (day >= week.deliveryDay) peak = Math.max(peak, level);
+    level -= input.grossRequirements[day] ?? 0;
+  }
+  return peak === Number.NEGATIVE_INFINITY ? level + qty : peak;
 }
 
 // ---------------------------------------------------------------------------
@@ -534,12 +580,13 @@ function buildIdeal(input: DeliveryScheduleInput, weeks: WeekBucket[]): IdealLin
   let lineNumber = 10;
 
   for (const week of weeks) {
-    // Exactly to requirement: enough to meet the week and end it on the buffer.
-    const needQty = Math.max(0, week.requirement + input.safetyStock - balance);
+    // Exactly to requirement: enough to meet the week and end it on the
+    // buffer, after what is already on order for it.
+    const needQty = Math.max(0, week.requirement + input.safetyStock - balance - week.existing);
 
     const sized = applyLotRules(needQty, input);
     const qty = sized.qty;
-    balance = balance + qty - week.requirement;
+    balance = balance + qty + week.existing - week.requirement;
 
     lines.push({
       line: lineNumber,
@@ -547,6 +594,7 @@ function buildIdeal(input: DeliveryScheduleInput, weeks: WeekBucket[]): IdealLin
       needByDate: fromEpochDay(input.planningEpochDay + week.deliveryDay),
       week: week.week,
       requirement: week.requirement,
+      existingReceipts: week.existing,
       needQty,
       lotSizingAddition: qty - needQty,
       qty,
@@ -653,17 +701,13 @@ function buildCommitted(input: DeliveryScheduleInput, weeks: WeekBucket[], ideal
    * because that is what has to fit on the floor once the week's consumption
    * has drawn it down.
    */
-  // One implementation, shared with the recovery pass. Two copies of a ceiling
-  // is how a schedule and a recommendation come to disagree about the same week.
-  const ceilingOf = (openingBalance: number, requirement: number): { limit: number; binds: ConstraintKey | null } =>
-    receiptCeiling(input, openingBalance, requirement);
-
   /** Rolls the balances for the current quantities. */
   const roll = (): number[] => {
     const balances: number[] = [];
     let running = input.openingBalance;
     for (let index = 0; index < weeks.length; index += 1) {
-      running = running + (qty[index] as number) - (weeks[index] as WeekBucket).requirement;
+      const week = weeks[index] as WeekBucket;
+      running = running + (qty[index] as number) + week.existing - week.requirement;
       balances.push(running);
     }
     return balances;
@@ -671,6 +715,19 @@ function buildCommitted(input: DeliveryScheduleInput, weeks: WeekBucket[], ideal
 
   const openingOf = (index: number, balances: number[]): number =>
     index === 0 ? input.openingBalance : (balances[index - 1] as number);
+
+  // One implementation, shared with the recovery pass. Two copies of a ceiling
+  // is how a schedule and a recommendation come to disagree about the same week.
+  //
+  // A weekly line is called off through the week, so the warehouse is asked
+  // about the balance the week closes on — with the open orders landing that
+  // week counted, because they take the same floor. Where the whole line as
+  // one drop would not fit, an advisory says so rather than the ceiling
+  // pretending the call-offs are guaranteed.
+  const ceilingAt = (index: number, balances: number[]): { limit: number; binds: ConstraintKey | null } => {
+    const week = weeks[index] as WeekBucket;
+    return receiptCeiling(input, openingOf(index, balances) + week.existing, week.requirement);
+  };
 
   // --- 3a. A closed week produces nothing ---------------------------------
   //
@@ -697,7 +754,7 @@ function buildCommitted(input: DeliveryScheduleInput, weeks: WeekBucket[], ideal
     let balances = roll();
     for (let index = 0; index < weeks.length; index += 1) {
       const week = weeks[index] as WeekBucket;
-      const { limit, binds } = ceilingOf(openingOf(index, balances), week.requirement);
+      const { limit, binds } = ceilingAt(index, balances);
       const lineQty = qty[index] as number;
       if (lineQty <= limit + QTY_EPSILON) continue;
       if (pinned.has(index)) continue;
@@ -731,7 +788,7 @@ function buildCommitted(input: DeliveryScheduleInput, weeks: WeekBucket[], ideal
     for (let index = 0; index < limitIndex && displaced > QTY_EPSILON; index += 1) {
       const week = weeks[index] as WeekBucket;
       if (week.isShutdown || pinned.has(index)) continue;
-      const { limit, binds } = ceilingOf(openingOf(index, balances), week.requirement);
+      const { limit, binds } = ceilingAt(index, balances);
       const headroom = roundDown(Math.max(0, limit - (qty[index] as number)), input.roundingValue);
       const pull = Math.min(displaced, headroom);
       if (pull <= 0) continue;
@@ -772,7 +829,7 @@ function buildCommitted(input: DeliveryScheduleInput, weeks: WeekBucket[], ideal
     let target = -1;
     for (let index = from; index < weeks.length; index += 1) {
       if ((weeks[index] as WeekBucket).isShutdown || pinned.has(index)) continue;
-      const { limit } = ceilingOf(openingOf(index, balances), (weeks[index] as WeekBucket).requirement);
+      const { limit } = ceilingAt(index, balances);
       if (limit - (qty[index] as number) >= displaced - QTY_EPSILON) {
         target = index;
         break;
@@ -793,7 +850,7 @@ function buildCommitted(input: DeliveryScheduleInput, weeks: WeekBucket[], ideal
     for (let index = from; index < weeks.length && displaced > QTY_EPSILON; index += 1) {
       const week = weeks[index] as WeekBucket;
       if (week.isShutdown || pinned.has(index)) continue;
-      const { limit } = ceilingOf(openingOf(index, running), week.requirement);
+      const { limit } = ceilingAt(index, running);
       const headroom = roundDown(Math.max(0, limit - (qty[index] as number)), input.roundingValue);
       const add = Math.min(displaced, headroom);
       if (add <= 0) continue;
@@ -863,7 +920,7 @@ function buildCommitted(input: DeliveryScheduleInput, weeks: WeekBucket[], ideal
       // Into the earlier delivery, as much as its ceiling allows. Whatever
       // will not fit is displaced and reported rather than dropped.
       const balances = roll();
-      const { limit } = ceilingOf(openingOf(previousIndex, balances), (weeks[previousIndex] as WeekBucket).requirement);
+      const { limit } = ceilingAt(previousIndex, balances);
       const room = Math.max(0, limit - (qty[previousIndex] as number));
       const folded = Math.min(merged, room);
       qty[previousIndex] = (qty[previousIndex] as number) + folded;
@@ -890,6 +947,7 @@ function buildCommitted(input: DeliveryScheduleInput, weeks: WeekBucket[], ideal
       qty: lineQty,
       delta: lineQty - idealLine.qty,
       balanceAfter: balances[index] as number,
+      singleDropPeak: peakFromDelivery(input, week, openingOf(index, balances), lineQty),
       constraint: constraint[index] ?? null,
       note: notes[index] as string,
       insideFence: lineQty > 0 && gap > 0,
@@ -1007,7 +1065,11 @@ function findBlockingViolations(deltas: ScheduleDelta[], committed: CommittedLin
 }
 
 /** Findings worth stating that are not reasons to stop. */
-function findAdvisories(committed: CommittedLine[], residual: ResidualExposure | null): ScheduleAdvisory[] {
+function findAdvisories(
+  input: DeliveryScheduleInput,
+  committed: CommittedLine[],
+  residual: ResidualExposure | null
+): ScheduleAdvisory[] {
   const advisories: ScheduleAdvisory[] = [];
 
   if (residual !== null) {
@@ -1027,6 +1089,21 @@ function findAdvisories(committed: CommittedLine[], residual: ResidualExposure |
       kind: 'INSIDE_FENCE',
       message: `Line ${line.line} is needed ${line.unreachableByDays} days before a newly placed order could arrive. It cannot be closed by ordering.`,
     });
+  }
+
+  // The warehouse ceiling was checked as call-offs. Where one truck would not
+  // fit, that assumption is doing real work and the vendor has to be told.
+  const cap = input.storageCapacity;
+  if (cap !== null && cap > 0) {
+    for (const line of committed) {
+      if (line.qty <= QTY_EPSILON || line.singleDropPeak <= cap + QTY_EPSILON) continue;
+      advisories.push({
+        line: line.line,
+        week: line.week,
+        kind: 'CALL_OFF_REQUIRED',
+        message: `Line ${line.line} fits only as call-offs through ${line.week}. As one drop on ${line.deliveryDate} it would put ${format(line.singleDropPeak)} ${input.baseUom} on the floor against a ${format(cap)} ceiling.`,
+      });
+    }
   }
 
   return advisories;
@@ -1127,8 +1204,8 @@ function summariseConstraints(
       input.storageCapacity,
       binds,
       binds
-        ? `The plant holds ${format(input.storageCapacity)} of this item at most, and the schedule reaches it.`
-        : `Peak holding is ${format(peak)} against ${format(input.storageCapacity)} of space.`
+        ? `The plant holds ${format(input.storageCapacity)} of this item at most, and the schedule reaches it. Checked against each week's closing balance, which assumes the week is called off in daily drops.`
+        : `Peak holding is ${format(peak)} against ${format(input.storageCapacity)} of space, at week end with daily call-offs.`
     );
   }
   if (input.productionShutdownWeeks.length > 0) {
@@ -1242,6 +1319,15 @@ function buildLedger(
   residual: ResidualExposure | null
 ): string[] {
   const entries: string[] = [];
+
+  // Said first, because it decides how to read every number after it.
+  const onOrder = ideal.filter((line) => line.existingReceipts > QTY_EPSILON);
+  if (onOrder.length > 0) {
+    const total = onOrder.reduce((sum, line) => sum + line.existingReceipts, 0);
+    entries.push(
+      `${format(total)} ${input.baseUom} is already on order or in quality across ${onOrder.map((line) => line.week).join(', ')}. This schedule is in addition to it, not in place of it.`
+    );
+  }
 
   const shutdown = deltas.filter((delta) => delta.constraint === 'VENDOR_SHUTDOWN');
   for (const delta of shutdown) {

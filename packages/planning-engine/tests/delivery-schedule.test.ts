@@ -44,6 +44,7 @@ function bottleCampaign(overrides: Partial<DeliveryScheduleInput> = {}): Deliver
     fromDay: 7,
     toDay: 48,
     grossRequirements: requirements,
+    scheduledReceipts: new Float64Array(200),
     openingBalance: 260_000,
     safetyStock: 100_000,
     baseUom: 'MT',
@@ -495,5 +496,40 @@ describe('§6.2 — calendars and transit', () => {
     for (const line of result.committed) {
       expect(toEpochDay(line.deliveryDate) - toEpochDay(line.dispatchDate)).toBeGreaterThanOrEqual(5);
     }
+  });
+});
+
+describe('supply already on order', () => {
+  it('is netted before anything new is proposed, and the ledger says the schedule is in addition to it', () => {
+    const receipts = new Float64Array(200);
+    // An open order of 100,000 landing on the Monday of W38.
+    receipts[14] = 100_000;
+    const withOrder = buildDeliverySchedule(bottleCampaign({ scheduledReceipts: receipts }));
+    const without = buildDeliverySchedule(bottleCampaign());
+
+    const w38 = (result: typeof without) => result.ideal.find((line) => line.week === 'W38');
+    expect(w38(withOrder)?.existingReceipts).toBe(100_000);
+    expect(w38(withOrder)?.needQty).toBeCloseTo((w38(without)?.needQty ?? 0) - 100_000, 6);
+    expect(withOrder.totals.ideal).toBeLessThan(without.totals.ideal);
+    expect(withOrder.ledger[0]).toContain('in addition to it, not in place of it');
+
+    // The balances the builder reports count the order, as the grid does.
+    const index = withOrder.committed.findIndex((line) => line.week === 'W38');
+    const opening = index === 0 ? 260_000 : (withOrder.committed[index - 1]?.balanceAfter as number);
+    const line = withOrder.committed[index]!;
+    expect(line.balanceAfter).toBeCloseTo(opening + line.qty + 100_000 - 210_000, 6);
+  });
+});
+
+describe('the warehouse ceiling, as call-offs', () => {
+  it('says when a week fits only because it is called off rather than dropped at once', () => {
+    const result = buildDeliverySchedule(bottleCampaign());
+    const w37 = result.committed.find((line) => line.week === 'W37')!;
+    // 260,000 on the floor and 240,000 more on the Monday: 500,000 against 320,000.
+    expect(w37.singleDropPeak).toBe(500_000);
+    const advisory = result.advisories.find((row) => row.kind === 'CALL_OFF_REQUIRED' && row.week === 'W37');
+    expect(advisory?.message).toContain('call-offs');
+    // An advisory, not a reason to stop.
+    expect(result.blockingViolations).toEqual([]);
   });
 });

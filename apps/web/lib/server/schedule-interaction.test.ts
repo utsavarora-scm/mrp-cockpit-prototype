@@ -145,3 +145,31 @@ describe('preparing the schedule', () => {
     expect(decisionLog().some((row) => row.target === 'delivery schedule prepared')).toBe(true);
   });
 });
+
+describe('the builder and the grid, on the same supply', () => {
+  it('nets the open deliveries the grid counts, and closes where the grid would', async () => {
+    const { HERO_RM } = await import('@repo/data-packs');
+    const { planKey, toEpochDay } = await import('@repo/domain');
+    const { runContext } = await import('./context');
+    const { scheduleBuilder } = await import('./schedule');
+
+    const view = scheduleBuilder('baseline', HERO_RM.itemId, HERO_RM.plantId)!;
+    const context = runContext('baseline');
+    const plan = context.materials.get(planKey(HERO_RM.itemId, HERO_RM.plantId))!.plan;
+    const fromDay = toEpochDay(view.window.fromDate) - context.planningEpochDay;
+    const toDay = toEpochDay(view.window.toDate) - context.planningEpochDay;
+
+    let onOrder = 0;
+    for (let day = Math.max(fromDay, 0); day <= toDay; day += 1) onOrder += plan.scheduledReceipts[day] as number;
+
+    // RM-30114 has two 1,150 MT lines inside its window. The builder counts them.
+    expect(onOrder).toBeGreaterThanOrEqual(2_300);
+    const counted = view.lines.reduce((sum, line) => sum + line.existingReceipts, 0);
+    expect(counted).toBeCloseTo(onOrder, 0);
+
+    // With nothing proposed, the builder's closing balance is the grid's.
+    const last = view.lines[view.lines.length - 1]!;
+    const proposed = view.lines.reduce((sum, line) => sum + line.committedQty, 0);
+    expect(last.balanceAfter - proposed).toBeCloseTo(plan.projectedBeforePlanned[toDay] as number, 0);
+  });
+});

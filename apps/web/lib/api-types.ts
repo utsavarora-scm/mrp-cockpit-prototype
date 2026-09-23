@@ -469,6 +469,8 @@ export interface ScheduleLineView {
   dispatchDate: string;
   /** What the requirement alone asked for. */
   requirement: number;
+  /** Open delivery lines and quality releases landing this week. Netted before `needQty`. */
+  existingReceipts: number;
   needQty: number;
   lotSizingAddition: number;
   idealQty: number;
@@ -547,7 +549,7 @@ export interface ScheduleViolationView {
 export interface ScheduleAdvisoryView {
   line: number | null;
   week: string | null;
-  kind: 'RESIDUAL_EXPOSURE' | 'INSIDE_FENCE';
+  kind: 'RESIDUAL_EXPOSURE' | 'INSIDE_FENCE' | 'CALL_OFF_REQUIRED';
   message: string;
 }
 

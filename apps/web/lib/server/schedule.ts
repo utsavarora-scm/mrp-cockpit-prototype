@@ -82,6 +82,9 @@ export function scheduleBuilder(
     fromDay: window.fromDay,
     toDay: window.toDay,
     grossRequirements: facts.plan.grossRequirements,
+    // The same dated supply the grid nets: open delivery lines and quality
+    // releases. Proposed deliveries are in addition to these, never instead.
+    scheduledReceipts: facts.plan.scheduledReceipts,
     openingBalance,
     safetyStock: facts.plan.safetyStock,
     dailyDemandMean: facts.dailyDemandMean,
@@ -117,6 +120,7 @@ export function scheduleBuilder(
       date: committed.deliveryDate,
       dispatchDate: committed.dispatchDate,
       requirement: round(ideal?.requirement ?? 0),
+      existingReceipts: round(ideal?.existingReceipts ?? 0),
       needQty: round(ideal?.needQty ?? 0),
       lotSizingAddition: round(ideal?.lotSizingAddition ?? 0),
       idealQty: round(committed.idealQty),
