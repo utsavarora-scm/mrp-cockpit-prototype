@@ -358,6 +358,9 @@ function toOpenLine(
     vendorId: order.vendorId,
     vendorName: order.vendorId ? (vendorNameById.get(order.vendorId) ?? null) : null,
     hasGrn: openQtyOf(line) === 0,
+    plannedDay: toEpochDay(line.plannedDate) - planningEpochDay,
+    plannedDate: line.plannedDate,
+    confirmedDate: line.confirmedDate,
   };
 }
 

@@ -154,6 +154,7 @@ describe('recording what happened to a line', () => {
         opening: plan.openingStock,
         inbound: total(plan.scheduledReceipts),
         onLineDate: plan.scheduledReceipts[dayOf('2026-09-14')] as number,
+        onConfirmedDate: plan.scheduledReceipts[dayOf('2026-09-18')] as number,
         releasedOn26th: plan.qaReleases[dayOf('2026-09-26')] as number,
       };
     };
@@ -163,10 +164,12 @@ describe('recording what happened to a line', () => {
     const after = position();
 
     // 1,120 of 1,150 arrived. Nothing is lost: it lands on the day quality
-    // releases it, and the 30 still owed stays on the line's own date.
+    // releases it, and the 30 still owed stays on order — on the 18th, the
+    // date the vendor confirmed, not the 14th the order asked for.
     expect(after.opening).toBe(before.opening);
     expect(after.inbound).toBeCloseTo(before.inbound, 6);
-    expect(after.onLineDate).toBeCloseTo(before.onLineDate - 1_120, 6);
+    expect(after.onLineDate).toBeCloseTo(before.onLineDate - 1_150, 6);
+    expect(after.onConfirmedDate).toBeCloseTo(before.onConfirmedDate + 30, 6);
     expect(after.releasedOn26th).toBeCloseTo(before.releasedOn26th + 1_120, 6);
 
     // Recorded again, it lands once.
@@ -187,5 +190,28 @@ describe('recording what happened to a line', () => {
       qaReleasedOn: '2026-08-30',
     });
     expect(opening()).toBe(before + 1_150);
+  });
+
+  it('plans on the date the vendor confirmed, and says what a later one costs', async () => {
+    const onDay = (iso: string) => {
+      const context = runContext('baseline');
+      const plan = context.materials.get(planKey(HERO_RM.itemId, HERO_RM.plantId))!.plan;
+      return plan.scheduledReceipts[toEpochDay(iso) - context.planningEpochDay] as number;
+    };
+    const askedFor = onDay('2026-09-14');
+    const promised = onDay('2026-10-02');
+
+    await post({
+      itemId: HERO_RM.itemId,
+      plantId: HERO_RM.plantId,
+      orderId: HERO_RM.openPoId,
+      line: 10,
+      confirmedDate: '2026-10-02',
+      reasonCode: 'VESSEL_ROLL',
+      note: 'Vendor re-confirmed later',
+    });
+
+    expect(onDay('2026-09-14')).toBeCloseTo(askedFor - 1_150, 6);
+    expect(onDay('2026-10-02')).toBeCloseTo(promised + 1_150, 6);
   });
 });

@@ -31,6 +31,7 @@ export type ExceptionCode =
   | 'PUSH_OUT'
   | 'PAST_DUE'
   | 'UNCONFIRMED_SUPPLY'
+  | 'CONFIRMED_LATE'
   | 'LEAD_TIME_DRIFT'
   | 'EXCESS_RISK'
   | 'HORIZONTAL_BLOCK'
@@ -164,6 +165,11 @@ export interface OpenLineContext {
   vendorId: string | null;
   vendorName: string | null;
   hasGrn: boolean;
+  /** Day offset of the date the order asked for. */
+  plannedDay: number;
+  plannedDate: string;
+  /** The date the vendor committed to, where they have. Planning runs on it. */
+  confirmedDate: string | null;
 }
 
 export interface CategorySibling {
@@ -604,6 +610,70 @@ export function raiseExceptions(context: MaterialContext, horizonDays: number): 
         ],
         actions: [
           `Ask ${late.vendorName ?? late.vendorId ?? 'the vendor'} to advance ${late.orderId} line ${late.line}.`,
+        ],
+      });
+    }
+  }
+
+  // ---- Confirmed later than asked ------------------------------------------
+  //
+  // A vendor's confirmation is the date the plan runs on, so a confirmation
+  // later than the order asked for moves the supply — silently, unless it is
+  // said. Raised only where the slip costs cover: a week late into a position
+  // that can carry it is a fact on the line, not a call to make.
+  {
+    const slipped = context.openLines
+      .filter(
+        (line) =>
+          line.confirmedDate !== null &&
+          !line.hasGrn &&
+          line.expectedDay > line.plannedDay &&
+          line.expectedDay >= 0 &&
+          line.plannedDay <= horizonDays
+      )
+      .map((line) => {
+        const from = Math.max(line.plannedDay, 0);
+        const cost = Math.min(
+          line.qty,
+          Math.max(
+            0,
+            baselineWorstDeficit -
+              worstDeficitWithShift(
+                plan.projectedAvailableFeasible,
+                safetyStock,
+                horizonDays,
+                line.qty,
+                from,
+                Math.min(line.expectedDay, horizonDays + 1)
+              )
+          )
+        );
+        return { line, cost };
+      })
+      .filter((row) => row.cost > 0)
+      .sort((a, b) => b.cost - a.cost);
+
+    const worst = slipped[0];
+    if (worst) {
+      const { line, cost } = worst;
+      const slip = line.expectedDay - line.plannedDay;
+      emit({
+        code: 'CONFIRMED_LATE',
+        group: 'MOVE_EXISTING_ORDER',
+        severity: 'HIGH',
+        headline: `${line.vendorName ?? line.vendorId ?? 'The vendor'} confirmed ${line.orderId} line ${line.line} for ${line.confirmedDate}, ${slip} days after the ${line.plannedDate} it was ordered for. The plan now runs on the later date.`,
+        biteDay: Math.max(line.plannedDay, 0),
+        qtyAtStake: cost,
+        reachableByOrdering: false,
+        operands: [
+          { label: 'Ordered for day', value: line.plannedDay, source: `Schedule line ${line.orderId}/${line.line}` },
+          { label: 'Confirmed for day', value: line.expectedDay, source: 'Vendor confirmation, as recorded' },
+          { label: 'Days late', value: slip, source: 'Confirmed less ordered' },
+          { label: 'Quantity on the line', value: line.qty, source: 'Open schedule line' },
+        ],
+        actions: [
+          `Push ${line.vendorName ?? line.vendorId ?? 'the vendor'} back to ${line.plannedDate} on ${line.orderId} line ${line.line}.`,
+          'Or cover the gap from another open line or source.',
         ],
       });
     }

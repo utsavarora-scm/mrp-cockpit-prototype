@@ -369,6 +369,12 @@ export function snapshotFor(): PlanningSnapshot {
           next = {
             ...next,
             confirmedDate: capture.confirmedDate ?? next.confirmedDate,
+            // The vendor's date is the plan's date. A confirmation later than
+            // the order asked for moves the receipt in the grid, and the
+            // late-confirmation exception says what that costs; left on the
+            // old date, the plan counts material on a day nobody promised it.
+            expectedDate: capture.confirmedDate ?? next.expectedDate,
+            status: capture.confirmedDate && next.status === 'PLANNED' ? 'CONFIRMED' : next.status,
             acknowledgedOn: capture.acknowledgedOn ?? next.acknowledgedOn,
             dispatchedOn: capture.dispatchedOn ?? next.dispatchedOn,
             grnDate: capture.grnDate ?? next.grnDate,

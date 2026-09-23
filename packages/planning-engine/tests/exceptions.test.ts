@@ -313,6 +313,9 @@ describe('5 — pull-in', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: false,
+            plannedDay: 40,
+            plannedDate: '2026-10-10',
+            confirmedDate: null,
           },
         ],
       })
@@ -341,6 +344,9 @@ describe('6 — push-out', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: false,
+            plannedDay: 30,
+            plannedDate: '2026-09-30',
+            confirmedDate: null,
           },
         ],
       })
@@ -369,6 +375,9 @@ describe('6 — push-out', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: false,
+            plannedDay: 30,
+            plannedDate: '2026-09-30',
+            confirmedDate: null,
           },
         ],
       })
@@ -391,6 +400,9 @@ describe('6 — push-out', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: false,
+            plannedDay: 30,
+            plannedDate: '2026-09-30',
+            confirmedDate: null,
           },
         ],
       })
@@ -414,6 +426,9 @@ describe('7 — past due', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: false,
+            plannedDay: -9,
+            plannedDate: '2026-08-22',
+            confirmedDate: null,
           },
         ],
       })
@@ -435,11 +450,46 @@ describe('7 — past due', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: true,
+            plannedDay: -9,
+            plannedDate: '2026-08-22',
+            confirmedDate: null,
           },
         ],
       })
     );
     expect(raised).not.toContain('PAST_DUE');
+  });
+});
+
+describe('a confirmation later than the order asked for', () => {
+  const line = {
+    orderId: 'PO-4',
+    line: 10,
+    qty: 600,
+    expectedDay: 30,
+    expectedDate: '2026-09-30',
+    tier: 1 as const,
+    vendorId: 'V-1',
+    vendorName: 'A vendor',
+    hasGrn: false,
+    plannedDay: 18,
+    plannedDate: '2026-09-18',
+    confirmedDate: '2026-09-30',
+  };
+
+  it('fires where the slip opens a shortfall the ordered date would have covered', () => {
+    const balance = series(1_000);
+    for (let day = 18; day < 30; day += 1) balance[day] = 200;
+    const raised = context({ plan: plan({ projectedAvailableFeasible: balance }), openLines: [line] });
+    const exception = raiseExceptions(raised, HORIZON).find((row) => row.code === 'CONFIRMED_LATE');
+    expect(exception?.headline).toContain('12 days after');
+    // 300 below a 500 buffer; the 600 on the line would have closed all of it.
+    expect(exception?.qtyAtStake).toBe(300);
+  });
+
+  it('stays quiet when the position carries the slip', () => {
+    const raised = codes(context({ openLines: [line] }));
+    expect(raised).not.toContain('CONFIRMED_LATE');
   });
 });
 
@@ -464,6 +514,9 @@ describe('8 — unconfirmed supply in a critical week', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: false,
+            plannedDay: 12,
+            plannedDate: '2026-09-12',
+            confirmedDate: null,
           },
         ],
       })
@@ -601,6 +654,9 @@ describe('every code the union declares is reachable', () => {
     const confirmedOnly = series(1_000);
     confirmedOnly[10] = 200;
 
+    // Short between the day ordered for and the day confirmed for.
+    const late = series(1_000);
+    for (let day = 18; day < 30; day += 1) late[day] = 200;
     const cases: MaterialContext[] = [
       context({ plan: plan({ projectedAvailableFeasible: balance }) }),
       context({ plan: plan({ projectedAvailableFeasible: series(1_000).map(() => 300) as unknown as Float64Array }) }),
@@ -622,6 +678,9 @@ describe('every code the union declares is reachable', () => {
             vendorId: 'V-1',
             vendorName: 'V',
             hasGrn: false,
+            plannedDay: 40,
+            plannedDate: '2026-10-10',
+            confirmedDate: null,
           },
         ],
       }),
@@ -639,6 +698,9 @@ describe('every code the union declares is reachable', () => {
             vendorId: 'V-1',
             vendorName: 'V',
             hasGrn: false,
+            plannedDay: 30,
+            plannedDate: '2026-09-30',
+            confirmedDate: null,
           },
         ],
       }),
@@ -654,6 +716,9 @@ describe('every code the union declares is reachable', () => {
             vendorId: 'V-1',
             vendorName: 'V',
             hasGrn: false,
+            plannedDay: -9,
+            plannedDate: '2026-08-22',
+            confirmedDate: null,
           },
         ],
       }),
@@ -670,6 +735,28 @@ describe('every code the union declares is reachable', () => {
             vendorId: 'V-1',
             vendorName: 'V',
             hasGrn: false,
+            plannedDay: 12,
+            plannedDate: '2026-09-12',
+            confirmedDate: null,
+          },
+        ],
+      }),
+      context({
+        plan: plan({ projectedAvailableFeasible: late }),
+        openLines: [
+          {
+            orderId: 'PO-4',
+            line: 10,
+            qty: 600,
+            expectedDay: 30,
+            expectedDate: '2026-09-30',
+            tier: 1,
+            vendorId: 'V-1',
+            vendorName: 'V',
+            hasGrn: false,
+            plannedDay: 18,
+            plannedDate: '2026-09-18',
+            confirmedDate: '2026-09-30',
           },
         ],
       }),
@@ -695,6 +782,7 @@ describe('every code the union declares is reachable', () => {
       'PUSH_OUT',
       'PAST_DUE',
       'UNCONFIRMED_SUPPLY',
+      'CONFIRMED_LATE',
       'LEAD_TIME_DRIFT',
       'EXCESS_RISK',
       'HORIZONTAL_BLOCK',
@@ -741,6 +829,9 @@ describe('exposure on an existing line, as a counterfactual', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: false,
+            plannedDay: -30,
+            plannedDate: '2026-08-01',
+            confirmedDate: null,
           },
         ],
       }),
@@ -772,6 +863,9 @@ describe('exposure on an existing line, as a counterfactual', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: false,
+            plannedDay: -30,
+            plannedDate: '2026-08-01',
+            confirmedDate: null,
           },
         ],
       }),
@@ -796,6 +890,9 @@ describe('exposure on an existing line, as a counterfactual', () => {
             vendorId: 'V-1',
             vendorName: 'A vendor',
             hasGrn: false,
+            plannedDay: 60,
+            plannedDate: '2026-10-30',
+            confirmedDate: null,
           },
         ],
       }),
