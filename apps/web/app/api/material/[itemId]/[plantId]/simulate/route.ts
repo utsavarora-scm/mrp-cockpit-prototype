@@ -10,7 +10,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import type { ItemPlant } from '@repo/domain';
 
-import { note, parseBody, quantity, reasonCode } from '@/lib/server/validation';
+import { note, parseBody, quantity, reasonCode, savingRoute } from '@/lib/server/validation';
 import type { SimulationChange } from '@/lib/server/planning-session';
 
 import { SIMULATABLE_FIELDS, simulate } from '@/lib/server/simulate';
@@ -82,7 +82,10 @@ export async function GET(request: Request, context: { params: Promise<{ itemId:
   return NextResponse.json(result);
 }
 
-export async function POST(request: Request, context: { params: Promise<{ itemId: string; plantId: string }> }) {
+export const POST = savingRoute(async function POST(
+  request: Request,
+  context: { params: Promise<{ itemId: string; plantId: string }> },
+) {
   const { itemId: rawItem, plantId: rawPlant } = await context.params;
   const itemId = decodeURIComponent(rawItem);
   const plantId = decodeURIComponent(rawPlant);
@@ -134,4 +137,4 @@ export async function POST(request: Request, context: { params: Promise<{ itemId
   );
 
   return NextResponse.json(materialDetail(scenarioId, itemId, plantId));
-}
+});

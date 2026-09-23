@@ -573,10 +573,10 @@ export function record(
   audit: { target: string; before: string | null; after: string | null; reasonCode: string | null; note: string },
 ): RecordedDecision {
   const state = session();
-  state.sequence += 1;
+  const sequence = state.sequence + 1;
 
   const event: StoredEvent = {
-    eventId: `DEC-${String(state.sequence).padStart(4, '0')}`,
+    eventId: `DEC-${String(sequence).padStart(4, '0')}`,
     schemaVersion: EVENT_SCHEMA_VERSION,
     recordedAt: new Date().toISOString(),
     actor: 'Planner',
@@ -584,8 +584,12 @@ export function record(
   } as StoredEvent;
   event.mutation = mutation;
 
-  applyMutation(state, mutation);
+  // Written before it is applied. If the log refuses it, the session is
+  // untouched and the planner is told — rather than shown a decision that
+  // exists on this instance only and is gone at the next restart.
   appendEvent(event);
+  state.sequence = sequence;
+  applyMutation(state, mutation);
 
   const decision: RecordedDecision = {
     id: event.eventId,

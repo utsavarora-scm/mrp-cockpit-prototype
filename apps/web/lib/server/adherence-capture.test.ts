@@ -214,4 +214,23 @@ describe('recording what happened to a line', () => {
     expect(onDay('2026-09-14')).toBeCloseTo(askedFor - 1_150, 6);
     expect(onDay('2026-10-02')).toBeCloseTo(promised + 1_150, 6);
   });
+
+  it('refuses a decision the log cannot take, and changes nothing', async () => {
+    const { GET: health } = await import('@/app/api/demo/health/route');
+    const real = process.env.MRP_EVENT_LOG;
+    // Under a file rather than a directory: no disk will write there.
+    process.env.MRP_EVENT_LOG = '/dev/null/cannot/decisions.jsonl';
+    try {
+      expect((await (await health()).json()).writable).toBe(false);
+
+      const response = await post(fullCapture);
+      expect(response.status).toBe(503);
+      expect((await response.json()).error).toContain('not saved');
+      expect(adherenceCaptures().size).toBe(0);
+      expect(decisionLog()).toEqual([]);
+    } finally {
+      process.env.MRP_EVENT_LOG = real;
+    }
+    expect((await (await health()).json()).writable).toBe(true);
+  });
 });

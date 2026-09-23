@@ -15,7 +15,7 @@ import { z } from 'zod';
 
 import { scheduleBuilder } from '@/lib/server/schedule';
 import { applyBuilderEdit, applyScheduleEdit, recordDecision } from '@/lib/server/planning-session';
-import { isoDate, note, parseBody, quantity, reasonCode } from '@/lib/server/validation';
+import { isoDate, note, parseBody, quantity, reasonCode, savingRoute } from '@/lib/server/validation';
 import { runContext } from '@/lib/server/context';
 import { planKey } from '@repo/domain';
 
@@ -70,7 +70,10 @@ export async function GET(request: Request, context: { params: Promise<{ itemId:
   return NextResponse.json(view);
 }
 
-export async function POST(request: Request, context: { params: Promise<{ itemId: string; plantId: string }> }) {
+export const POST = savingRoute(async function POST(
+  request: Request,
+  context: { params: Promise<{ itemId: string; plantId: string }> },
+) {
   const { itemId: rawItem, plantId: rawPlant } = await context.params;
   const itemId = decodeURIComponent(rawItem);
   const plantId = decodeURIComponent(rawPlant);
@@ -198,4 +201,4 @@ export async function POST(request: Request, context: { params: Promise<{ itemId
       })),
     acknowledged: input.acknowledge ? current.advisories : [],
   });
-}
+});

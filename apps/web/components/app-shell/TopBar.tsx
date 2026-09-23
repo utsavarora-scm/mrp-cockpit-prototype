@@ -19,7 +19,7 @@ import { ThemeToggle } from '@repo/ui/components/theme-toggle';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@repo/ui/components/tooltip';
 import { cn } from '@repo/ui/lib/utils';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Play, RotateCcw } from 'lucide-react';
+import { AlertTriangle, Play, RotateCcw } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { toast } from 'sonner';
@@ -58,6 +58,18 @@ export function TopBar() {
       if (!response.ok) throw new Error('The plan could not be read.');
       return response.json();
     },
+  });
+
+  // A server that cannot write its log accepts nothing a planner records. Said
+  // once, in the bar, rather than discovered one failed save at a time.
+  const health = useQuery({
+    queryKey: ['demo-health'],
+    queryFn: async (): Promise<{ writable: boolean }> => {
+      const response = await fetch('/api/demo/health');
+      if (!response.ok) throw new Error('Health check failed.');
+      return response.json();
+    },
+    staleTime: 60_000,
   });
 
   const run = useMutation({
@@ -149,8 +161,23 @@ export function TopBar() {
           </Tooltip>
         ) : null}
 
+        {health.data && !health.data.writable ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className='text-status-critical ml-auto flex items-center gap-1 text-[12px] font-medium'>
+                <AlertTriangle className='size-3.5' />
+                Not saving
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className='max-w-[300px]'>
+              This server cannot write its decision log, so overrides, edits and captures will be refused. The demo
+              needs a single, long-running server with a writable disk.
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
+
         <label
-          className='ml-auto flex items-center gap-2'
+          className={cn('flex items-center gap-2', !(health.data && !health.data.writable) && 'ml-auto')}
           title={pagePlant ? 'This screen is for one plant. Go back to the position to change plant.' : undefined}
         >
           <span className='sr-only'>Plant</span>
@@ -183,7 +210,9 @@ export function TopBar() {
               Reset
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Drops every override and schedule edit made in this session</TooltipContent>
+          <TooltipContent>
+            Drops every override, edit and capture on this server — for everyone using it, not only you
+          </TooltipContent>
         </Tooltip>
 
         <Button size='sm' className='h-8 gap-1.5 text-[13px]' onClick={() => run.mutate()} disabled={run.isPending}>

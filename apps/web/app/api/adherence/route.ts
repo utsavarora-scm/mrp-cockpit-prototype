@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { adherenceView } from '@/lib/server/adherence-view';
 import { captureAdherence } from '@/lib/server/planning-session';
 import { runContext } from '@/lib/server/context';
-import { isoDate, note, parseBody, quantity, reasonCode } from '@/lib/server/validation';
+import { isoDate, note, parseBody, quantity, reasonCode, savingRoute } from '@/lib/server/validation';
 import { planKey } from '@repo/domain';
 
 export const dynamic = 'force-dynamic';
@@ -87,7 +87,7 @@ export async function GET(request: Request) {
   );
 }
 
-export async function POST(request: Request) {
+export const POST = savingRoute(async function POST(request: Request) {
   const parsed = await parseBody(request, captureBody);
   if (parsed.error) return parsed.error;
   const input = parsed.data;
@@ -124,4 +124,4 @@ export async function POST(request: Request) {
   );
 
   return NextResponse.json(adherenceView(input.scenario, { plant: input.plantId, itemId: input.itemId }));
-}
+});

@@ -18,7 +18,7 @@
  * would need a real store. Nothing here pretends otherwise.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 import type { OverridableField } from './planning-session';
@@ -122,10 +122,57 @@ export function logPath(): string {
   return resolve(process.env.MRP_EVENT_LOG ?? resolve(process.cwd(), '.data', 'decisions.jsonl'));
 }
 
+/**
+ * A decision the log could not take.
+ *
+ * Raised rather than swallowed: a decision that reaches the screen and not the
+ * file is on this instance only, and the next restart — or the next instance
+ * behind the same address — silently loses it.
+ */
+export class DecisionNotSavedError extends Error {
+  constructor(cause: unknown) {
+    super(
+      'That decision was not saved: this server cannot write its decision log. Nothing was changed. ' +
+        'The demo needs a single, long-running server with a writable disk.',
+      { cause },
+    );
+    this.name = 'DecisionNotSavedError';
+  }
+}
+
 export function appendEvent(event: StoredEvent): void {
   const path = logPath();
-  mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(event)}\n`, 'utf8');
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${JSON.stringify(event)}\n`, 'utf8');
+  } catch (cause) {
+    throw new DecisionNotSavedError(cause);
+  }
+}
+
+/**
+ * Whether this server can keep what planners record.
+ *
+ * Checked by asking the filesystem, not by reading the deployment's name: a
+ * read-only disk is the failure that matters, whatever it is hosted on. It
+ * cannot see whether the disk outlives the instance — only a restart shows
+ * that — so the answer is necessary, not sufficient.
+ */
+export function logStatus(): { path: string; writable: boolean; events: number; detail: string | null } {
+  const path = logPath();
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    accessSync(dirname(path), constants.W_OK);
+    if (existsSync(path)) accessSync(path, constants.W_OK);
+    return { path, writable: true, events: readEvents().length, detail: null };
+  } catch (cause) {
+    return {
+      path,
+      writable: false,
+      events: 0,
+      detail: cause instanceof Error ? cause.message : String(cause),
+    };
+  }
 }
 
 /** Every event, oldest first. A malformed line is skipped, never fatal. */

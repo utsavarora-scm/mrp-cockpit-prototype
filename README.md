@@ -21,12 +21,29 @@ There is no database and nothing to seed: the entire dataset is generated from a
 identical on every machine and every run. Reset drops the session's overrides and keeps the generated base.
 
 ```bash
-pnpm test:unit    # 220 tests — the engines' maths, the dataset's calibration, and the two
+pnpm test:unit    # 284 tests — the engines' maths, the dataset's calibration, and the two
                   # worked examples asserted through the app's own projection modules
 pnpm typecheck
 pnpm lint:check   # `pnpm lint` runs eslint --fix and rewrites files; this one only reports
 pnpm build
 ```
+
+### Hosting a shared demo
+
+The session lives in one server process and decisions are written to one file on its disk. That suits one long-running
+server (`pnpm build && pnpm start`, or a single always-on container with a writable disk). It does not suit serverless
+or auto-scaled hosting: saves are refused on a read-only disk, and each instance keeps its own session.
+
+Everyone on the same address shares one session. An override one person makes is visible to all of them, and **Reset
+clears it for everyone**.
+
+Before handing the address over, open `/api/demo/health` on it:
+
+- `writable` must be `true`. If it is not, the top bar shows **Not saving** and every capture, edit and override is
+  refused with a message rather than silently lost.
+- `instance` must stay the same across several reloads. If it changes, requests are reaching different processes.
+- Record one decision, restart the server, and check it is still there. The health check cannot tell whether the disk
+  survives a restart.
 
 ## The journey it is built around
 

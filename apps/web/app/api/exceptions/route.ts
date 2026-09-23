@@ -11,6 +11,7 @@ import type { ActionGroup } from '@repo/planning-engine';
 
 import { exceptionQueue } from '@/lib/server/exception-queue';
 import { dismissException } from '@/lib/server/planning-session';
+import { savingRoute } from '@/lib/server/validation';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,7 +35,7 @@ export async function GET(request: Request) {
   );
 }
 
-export async function POST(request: Request) {
+export const POST = savingRoute(async function POST(request: Request) {
   const body = (await request.json()) as {
     id?: string;
     itemId?: string;
@@ -53,4 +54,4 @@ export async function POST(request: Request) {
 
   dismissException(body.id, body.itemId, body.plantId, body.reasonCode, body.note ?? '');
   return NextResponse.json(exceptionQueue(body.scenario ?? 'baseline'));
-}
+});

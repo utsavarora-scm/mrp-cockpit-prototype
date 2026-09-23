@@ -17,6 +17,8 @@ import { REASON_CODES, toEpochDay } from '@repo/domain';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
+import { DecisionNotSavedError } from './event-log';
+
 const REASON_CODE_VALUES = REASON_CODES.map((row) => row.code) as [string, ...string[]];
 
 /** A closed list, not a free-text field. */
@@ -42,6 +44,25 @@ export const note = z.string().max(500).default('');
  * The message names the field, because "invalid request" tells a planner
  * nothing and tells whoever is debugging it less.
  */
+/**
+ * Wraps a route that records decisions, so a log that cannot be written comes
+ * back as a sentence rather than an empty 500 the screen cannot read.
+ */
+export function savingRoute<Args extends unknown[]>(
+  handler: (...args: Args) => Promise<Response>,
+): (...args: Args) => Promise<Response> {
+  return async (...args) => {
+    try {
+      return await handler(...args);
+    } catch (error) {
+      if (error instanceof DecisionNotSavedError) {
+        return NextResponse.json({ error: error.message }, { status: 503 });
+      }
+      throw error;
+    }
+  };
+}
+
 export async function parseBody<T>(
   request: Request,
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
