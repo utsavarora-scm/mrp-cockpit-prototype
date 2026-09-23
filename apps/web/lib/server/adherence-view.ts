@@ -18,7 +18,7 @@
  * on later.
  */
 
-import { INTERVAL_OWNERS, planKey, REASON_CODES, reasonLabel, toEpochDay } from '@repo/domain';
+import { INTERVAL_OWNERS, openQtyOf, planKey, REASON_CODES, reasonLabel, toEpochDay } from '@repo/domain';
 
 import type {
   AdherenceByMaterial,
@@ -258,8 +258,7 @@ function byVendor(context: RunContext, filters: { plant?: string; itemId?: strin
   for (const facts of context.materials.values()) {
     for (const order of facts.orders) {
       if (!order.vendorId) continue;
-      const open = (order.schedule ?? []).filter((line) => line.status !== 'RECEIVED');
-      const value = open.reduce((sum, line) => sum + line.qty * facts.standardCost, 0);
+      const value = (order.schedule ?? []).reduce((sum, line) => sum + openQtyOf(line) * facts.standardCost, 0);
       openValueByVendor.set(order.vendorId, (openValueByVendor.get(order.vendorId) ?? 0) + value);
     }
   }

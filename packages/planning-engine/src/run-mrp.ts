@@ -23,6 +23,7 @@ import {
   type StockPosition,
   type SupplyElement,
   type SupplyTier,
+  openQtyOf,
   planKey,
   tierOfLine,
   toEpochDay,
@@ -140,8 +141,11 @@ export function runMrp(snapshot: PlanningSnapshot, options: MrpOptions): MrpResu
     const lines: Array<{ qty: number; date: string; tier: SupplyTier }> =
       element.schedule && element.schedule.length > 0
         ? element.schedule
-            .filter((line) => line.status !== 'RECEIVED')
-            .map((line) => ({ qty: line.qty, date: line.expectedDate, tier: tierOfLine(line) }))
+            // What each line still owes. A short receipt leaves its balance
+            // open; what did arrive is stock, and counting it here as well
+            // would net the same material twice.
+            .map((line) => ({ qty: openQtyOf(line), date: line.expectedDate, tier: tierOfLine(line) }))
+            .filter((line) => line.qty > 0)
         : [{ qty: element.qty, date: element.dueDate, tier: element.isFirm ? 2 : 3 }];
 
     for (const line of lines) {

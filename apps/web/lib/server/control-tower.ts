@@ -15,7 +15,7 @@
  * accurately. Counting is Phase 1; concluding is later.
  */
 
-import { toEpochDay } from '@repo/domain';
+import { openQtyOf, toEpochDay } from '@repo/domain';
 
 import type { ControlTowerView } from '../api-types';
 import { runContext, type RunContext } from './context';
@@ -59,7 +59,7 @@ function openBook(context: RunContext, filters: { plant?: string }): ControlTowe
     if (filters.plant && facts.plantId !== filters.plant) continue;
     for (const order of facts.orders) {
       for (const line of order.schedule ?? []) {
-        if (line.status === 'RECEIVED') continue;
+        if (openQtyOf(line) === 0) continue;
         const overdue = toEpochDay(line.expectedDate) - context.planningEpochDay < -ON_TIME_TOLERANCE_DAYS;
         const bucket = overdue
           ? 'Past due, no goods receipt'
@@ -69,8 +69,8 @@ function openBook(context: RunContext, filters: { plant?: string }): ControlTowe
               ? 'Dispatched / in transit'
               : 'Confirmed, not yet dispatched';
         states[bucket].lines += 1;
-        states[bucket].qty += line.qty;
-        states[bucket].value += line.qty * facts.standardCost;
+        states[bucket].qty += openQtyOf(line);
+        states[bucket].value += openQtyOf(line) * facts.standardCost;
       }
     }
   }
@@ -151,10 +151,10 @@ function byPlant(context: RunContext): ControlTowerView['byPlant'] {
   for (const facts of context.materials.values()) {
     for (const order of facts.orders) {
       for (const line of order.schedule ?? []) {
-        if (line.status === 'RECEIVED') continue;
+        if (openQtyOf(line) === 0) continue;
         const entry = rows.get(facts.plantId) ?? { lines: 0, value: 0, unconfirmed: 0 };
         entry.lines += 1;
-        entry.value += line.qty * facts.standardCost;
+        entry.value += openQtyOf(line) * facts.standardCost;
         if (line.confirmedDate === null) entry.unconfirmed += 1;
         rows.set(facts.plantId, entry);
       }
@@ -200,10 +200,10 @@ function byVendor(context: RunContext): ControlTowerView['byVendor'] {
     for (const order of facts.orders) {
       if (!order.vendorId) continue;
       for (const line of order.schedule ?? []) {
-        if (line.status === 'RECEIVED') continue;
+        if (openQtyOf(line) === 0) continue;
         const entry = open.get(order.vendorId) ?? { lines: 0, value: 0 };
         entry.lines += 1;
-        entry.value += line.qty * facts.standardCost;
+        entry.value += openQtyOf(line) * facts.standardCost;
         open.set(order.vendorId, entry);
       }
     }
@@ -247,7 +247,7 @@ function byRaiser(context: RunContext, filters: { plant?: string }): ControlTowe
     if (filters.plant && facts.plantId !== filters.plant) continue;
     for (const order of facts.orders) {
       for (const line of order.schedule ?? []) {
-        if (line.status === 'RECEIVED') continue;
+        if (openQtyOf(line) === 0) continue;
         if (copackers.has(facts.plantId) || facts.vendor?.isImport) counts['Head office'] += 1;
         else counts.Plant += 1;
       }

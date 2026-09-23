@@ -9,8 +9,10 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { HERO_RM } from '@repo/data-packs';
+import { planKey, toEpochDay } from '@repo/domain';
 
 import { POST as capture, GET as readAdherence } from '@/app/api/adherence/route';
+import { runContext } from './context';
 import { adherenceCaptures, decisionLog, resetDemo } from './planning-session';
 import { readEvents } from './event-log';
 import type { AdherenceView } from '../api-types';
@@ -140,5 +142,50 @@ describe('recording what happened to a line', () => {
     expect(readEvents()).toEqual([]);
     expect(adherenceCaptures().size).toBe(0);
     expect(decisionLog()).toEqual([]);
+  });
+
+  it('moves a receipt into stock and keeps the short balance on order', async () => {
+    const position = () => {
+      const context = runContext('baseline');
+      const plan = context.materials.get(planKey(HERO_RM.itemId, HERO_RM.plantId))!.plan;
+      const dayOf = (iso: string) => toEpochDay(iso) - context.planningEpochDay;
+      const total = (series: Float64Array) => series.reduce((sum, value) => sum + value, 0);
+      return {
+        opening: plan.openingStock,
+        inbound: total(plan.scheduledReceipts),
+        onLineDate: plan.scheduledReceipts[dayOf('2026-09-14')] as number,
+        releasedOn26th: plan.qaReleases[dayOf('2026-09-26')] as number,
+      };
+    };
+
+    const before = position();
+    await post(fullCapture);
+    const after = position();
+
+    // 1,120 of 1,150 arrived. Nothing is lost: it lands on the day quality
+    // releases it, and the 30 still owed stays on the line's own date.
+    expect(after.opening).toBe(before.opening);
+    expect(after.inbound).toBeCloseTo(before.inbound, 6);
+    expect(after.onLineDate).toBeCloseTo(before.onLineDate - 1_120, 6);
+    expect(after.releasedOn26th).toBeCloseTo(before.releasedOn26th + 1_120, 6);
+
+    // Recorded again, it lands once.
+    await post({ ...fullCapture, note: 'corrected' });
+    expect(position()).toEqual(after);
+  });
+
+  it('counts a receipt released by the planning date as stock on hand', async () => {
+    const opening = () =>
+      runContext('baseline').materials.get(planKey(HERO_RM.itemId, HERO_RM.plantId))!.plan.openingStock;
+    const before = opening();
+    await post({
+      ...fullCapture,
+      acknowledgedOn: null,
+      dispatchedOn: null,
+      grnDate: '2026-08-28',
+      grnQty: 1_150,
+      qaReleasedOn: '2026-08-30',
+    });
+    expect(opening()).toBe(before + 1_150);
   });
 });

@@ -329,6 +329,7 @@ export function snapshotFor(): PlanningSnapshot {
   }
 
   let supply = state.baseSnapshot.supply;
+  const arrivals: CapturedArrival[] = [];
   if (state.scheduleEdits.size > 0 || state.adherenceCaptures.size > 0) {
     supply = supply.map((element) => {
       if (!element.schedule || element.schedule.length === 0) return element;
@@ -358,6 +359,10 @@ export function snapshotFor(): PlanningSnapshot {
         }
 
         if (capture) {
+          // A receipt the feed already had is already in its stock. Only one
+          // the planner is recording for the first time moves material.
+          const alreadyReceived = line.status === 'RECEIVED' || line.grnDate !== null;
+
           // What the planner recorded after the call they were already making.
           // Only the fields they filled in — an absent date stays absent rather
           // than overwriting what the feed already knew.
@@ -371,8 +376,22 @@ export function snapshotFor(): PlanningSnapshot {
             qaReleasedOn: capture.qaReleasedOn ?? next.qaReleasedOn,
             reasonCode: capture.reasonCode || next.reasonCode,
             note: capture.note || next.note,
-            status: capture.grnDate ? 'RECEIVED' : next.status,
           };
+
+          if (capture.grnDate && !alreadyReceived) {
+            const received = capture.grnQty ?? next.qty;
+            arrivals.push({
+              itemId: element.itemId,
+              plantId: element.plantId,
+              batchId: `GRN-${element.id}-${line.line}`,
+              qty: received,
+              grnDate: capture.grnDate,
+              qaReleasedOn: capture.qaReleasedOn,
+            });
+            // Closed only when it has all arrived. A short receipt leaves the
+            // balance open on the line's own date, still owed and still netted.
+            if (received >= next.qty) next = { ...next, status: 'RECEIVED' };
+          }
         }
 
         return next;
@@ -386,8 +405,94 @@ export function snapshotFor(): PlanningSnapshot {
     ...state.baseSnapshot,
     itemPlants,
     supply,
+    stock: withCapturedArrivals(state.baseSnapshot.stock, arrivals, itemPlants, state.pack.planningDate),
     receiptHistory: withCapturedReceipts(state, supply),
   };
+}
+
+/** A goods receipt the planner recorded, on its way into stock. */
+interface CapturedArrival {
+  itemId: string;
+  plantId: string;
+  batchId: string;
+  qty: number;
+  grnDate: string;
+  qaReleasedOn: string | null;
+}
+
+/**
+ * Stock, with what the planner recorded as received folded in.
+ *
+ * A receipt is not available the day it arrives. It becomes stock on the day
+ * quality releases it — the recorded release where there is one, the
+ * material's quarantine period after the receipt where there is not — and
+ * until then it is a dated quality lot, exactly as the feed's own quarantine
+ * is. Released by the planning date, it is unrestricted stock.
+ *
+ * Rebuilt from the pristine base on every read, so recording the same receipt
+ * twice lands it once.
+ */
+function withCapturedArrivals(
+  base: PlanningSnapshot['stock'],
+  arrivals: CapturedArrival[],
+  itemPlants: ItemPlant[],
+  planningDate: string,
+): PlanningSnapshot['stock'] {
+  if (arrivals.length === 0) return base;
+
+  const planningDay = toEpochDay(planningDate);
+  const byKey = new Map<string, PlanningSnapshot['stock'][number]>(
+    base.map((position) => [`${position.itemId}@${position.plantId}`, position]),
+  );
+  const touched = new Set<string>();
+
+  for (const arrival of arrivals) {
+    const key = `${arrival.itemId}@${arrival.plantId}`;
+    const quarantineDays =
+      itemPlants.find((row) => row.itemId === arrival.itemId && row.plantId === arrival.plantId)?.qaQuarantineDays ?? 0;
+    const releaseDate = arrival.qaReleasedOn ?? fromEpochDay(toEpochDay(arrival.grnDate) + quarantineDays);
+
+    const current = byKey.get(key) ?? {
+      itemId: arrival.itemId,
+      plantId: arrival.plantId,
+      unrestricted: 0,
+      blocked: 0,
+      qualityInspection: 0,
+      inTransit: 0,
+      batches: [],
+      quarantine: [],
+    };
+
+    byKey.set(
+      key,
+      toEpochDay(releaseDate) <= planningDay
+        ? {
+            ...current,
+            unrestricted: current.unrestricted + arrival.qty,
+            batches: [...current.batches, { batchId: arrival.batchId, qty: arrival.qty, expiryDate: null }],
+          }
+        : {
+            ...current,
+            qualityInspection: current.qualityInspection + arrival.qty,
+            quarantine: [
+              ...current.quarantine,
+              {
+                batchId: arrival.batchId,
+                qty: arrival.qty,
+                receivedOn: arrival.grnDate,
+                expectedReleaseDate: releaseDate,
+              },
+            ],
+          },
+    );
+    touched.add(key);
+  }
+
+  const unseen = [...touched].filter((key) => !base.some((row) => `${row.itemId}@${row.plantId}` === key));
+  return [
+    ...base.map((position) => byKey.get(`${position.itemId}@${position.plantId}`) ?? position),
+    ...unseen.map((key) => byKey.get(key) as PlanningSnapshot['stock'][number]),
+  ];
 }
 
 /**

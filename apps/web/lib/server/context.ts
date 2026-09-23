@@ -13,6 +13,7 @@
 
 import { getDataPack, HERO_RM, type PlanChange } from '@repo/data-packs';
 import {
+  openQtyOf,
   planKey,
   toEpochDay,
   tierOfLine,
@@ -217,8 +218,12 @@ function build(scenarioId: string, snapshot: PlanningSnapshot, plan: MrpResult):
     const dailyDemandMean = totalDemand / Math.max(horizonDays, 1);
 
     const orders = supplyByKey.get(key) ?? [];
+    // Only what is still owed. A line received in full has nothing left to
+    // chase, and one received short is chased for its balance.
     const openLines = orders.flatMap((order) =>
-      (order.schedule ?? []).map((line) => toOpenLine(order, line, planningEpochDay, vendorNameById)),
+      (order.schedule ?? [])
+        .filter((line) => openQtyOf(line) > 0)
+        .map((line) => toOpenLine(order, line, planningEpochDay, vendorNameById)),
     );
 
     // Measured on the balance *after* the orders that can still be placed.
@@ -346,13 +351,13 @@ function toOpenLine(
   return {
     orderId: order.id,
     line: line.line,
-    qty: line.qty,
+    qty: openQtyOf(line),
     expectedDay: toEpochDay(line.expectedDate) - planningEpochDay,
     expectedDate: line.expectedDate,
     tier: line.status === 'RECEIVED' ? 1 : tierOfLine(line),
     vendorId: order.vendorId,
     vendorName: order.vendorId ? (vendorNameById.get(order.vendorId) ?? null) : null,
-    hasGrn: line.grnDate !== null || line.status === 'RECEIVED',
+    hasGrn: openQtyOf(line) === 0,
   };
 }
 

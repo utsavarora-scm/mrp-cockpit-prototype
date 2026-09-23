@@ -97,6 +97,19 @@ export interface DeliveryLine {
   note: string | null;
 }
 
+/**
+ * What a delivery line still owes.
+ *
+ * A goods receipt short of the line does not close it: 1,120 received against
+ * 1,150 leaves 30 still to come, and the 1,120 is stock rather than supply. A
+ * line marked received is closed whatever arrived — the short-closure is the
+ * decision, and the plan should not keep waiting on the difference.
+ */
+export function openQtyOf(line: DeliveryLine): number {
+  if (line.status === 'RECEIVED') return 0;
+  return Math.max(0, line.qty - (line.grnQty ?? 0));
+}
+
 export interface SupplyElement {
   id: string;
   type: SupplyType;
